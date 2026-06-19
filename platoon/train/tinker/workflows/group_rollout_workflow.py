@@ -216,8 +216,11 @@ class GroupRolloutWorkflow:
         # Check if all rewards are the same across ALL trajectories in the group, including subagent trajectories
         all_trajectory_rewards = [stats.reward for stats in all_trajectory_stats]
         if len(all_trajectory_rewards) > 1 and max(all_trajectory_rewards) == min(all_trajectory_rewards):
+            self.tracker.scalar(zero_variance_reward_group=1.0)
             logger.debug(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
-            return None
+            if self.config.filter_zero_variance_groups:
+                return None
+            logger.debug(f"Keeping zero-advantage datums for task {data['task_id']}")
 
         # Center advantages by rollout. The old_adv was set to trajectory_reward, so
         # this produces either reward - mean_reward or reward - loo_baseline.
