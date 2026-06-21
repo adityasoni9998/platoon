@@ -272,13 +272,18 @@ class GroupRolloutWorkflow:
             async with TinkerLLMProxySession() as session:
                 # Run the rollout with the proper config
                 results = await asyncio.create_task(self.rollout_fn(task, rollout_config))
+                has_returned_interactions = isinstance(results, dict) and "_tinker_interactions" in results
+                returned_interactions = results.pop("_tinker_interactions", {}) if has_returned_interactions else {}
 
                 if not results.get("trajectories"):
                     logger.warning(f"No trajectories found for task {task_id} and rollout {rollout_number}")
                     return None
 
                 # Get the llm interactions recorded during this session
-                interactions = session.interactions
+                if has_returned_interactions:
+                    interactions = returned_interactions
+                else:
+                    interactions = session.interactions
 
                 # Extract training data
                 result = get_train_data_for_trajectory_collection(
