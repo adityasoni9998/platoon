@@ -1,7 +1,7 @@
 from typing import List, Tuple
 from platoon.utils.openhands_utils import is_finished
 from platoon.openhands.env import OpenHandsEnv
-from openhands.sdk.event import ActionEvent
+from openhands.sdk.event import ActionEvent, MessageEvent
 from platoon.codescout.custom_tools.localization_finish import LocalizationFinishAction
 
 def get_structured_locations(events):
@@ -32,6 +32,27 @@ def get_structured_locations(events):
                 })
             return locations
     return None
+
+def count_llm_calls(events):
+    """Count model turns represented in an OpenHands event stream.
+
+    Parallel tool calls from one model response share an llm_response_id, so this
+    counts distinct agent llm_response_id values instead of individual actions.
+    """
+    llm_response_ids = set()
+
+    for event in events:
+        if not (
+            (isinstance(event, ActionEvent) and event.source == "agent")
+            or (isinstance(event, MessageEvent) and event.source == "agent")
+        ):
+            continue
+
+        llm_response_id = getattr(event, "llm_response_id", None)
+        if llm_response_id is not None:
+            llm_response_ids.add(llm_response_id)
+
+    return len(llm_response_ids)
 
 def parse_structured_outputs(structured_locations: List[dict]) -> Tuple[List[str], List[str], List[str]]:
     """
@@ -170,12 +191,20 @@ class CodeScoutEnv(OpenHandsEnv):
     async def evaluate(self) -> tuple[float, dict]:
         if not is_finished(await self.observe()):
             return 0, {}
-        
-        structured_locations = get_structured_locations(self._conversation.state.events)
+        reward = 0
+        metadata = {}
 
+        structured_locations = get_structured_locations(self._conversation.state.events)
+        num_turns = count_llm_calls(self._conversation.state.events)
+        turn_limit_reward = 0
+        metadata["num_turns"] = num_turns
+        if num_turns == 4:
+            turn_limit_reward = 1
         if structured_locations is None:
-            return 0, {}
+            return turn_limit_reward, metadata
         
         instance: dict = self.task.misc
-        reward, metadata = multilevel_localization_f1_reward(instance, structured_locations)
+        localization_reward, localization_metadata = multilevel_localization_f1_reward(instance, structured_locations)
+        reward = turn_limit_reward + localization_reward
+        metadata.update(localization_metadata)
         return reward, metadata

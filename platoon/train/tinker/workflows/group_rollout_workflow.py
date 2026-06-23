@@ -295,6 +295,8 @@ class GroupRolloutWorkflow:
                     reward_processor=self.reward_processor,
                     include_traj_depth=self.config.depth_level_weighting,
                     include_traj_start=self.config.depth_level_weighting,
+                    prefix_mismatch_tokenizer=self.model_info.llm.tokenizer,
+                    prefix_mismatch_debug_dir=os.environ.get("TINKER_PREFIX_MISMATCH_DEBUG_DIR"),
                 )
 
                 if not result.datums:

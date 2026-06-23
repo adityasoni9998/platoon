@@ -1,8 +1,8 @@
 # CodeScout Tinker training configuration
 train:
   model_name: Qwen/Qwen3-4B-Instruct-2507
-  renderer_name: qwen3_instruct
-  batch_size: 32
+  renderer_name: qwen3_instruct_exact
+  batch_size: 8
   num_epochs: 1
   max_training_steps: null
   num_minibatches: 1
