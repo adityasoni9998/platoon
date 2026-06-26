@@ -1,0 +1,58 @@
+# CodeScout Tinker training configuration
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  batch_size: 8
+  num_epochs: 1
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 6
+      output_dir: /data/user_data/adityabs/platoon_skyrl_tinker/codescout-cispo-lora_mi300
+      verbose: true
+      timeout: 600
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+    filter_zero_variance_groups: false 
+  num_concurrent_rollout_workflow_workers: 8 # number of task groups that run in paralle i.e. total concurrent rollouts = num_concurrent_rollout_workflow_workers * group_size
+
+# Eval configuration
+eval:
+  strategy: none
+
+# Checkpoint configuration
+checkpoint:
+  strategy: step
+  every: 100
+  load_checkpoint_path: null
+
+log_path: /data/user_data/adityabs/platoon_skyrl_tinker/logs
+tinker_base_url: null
+
+stats:
+  experiment_name: codescout-platoon-tinker
+  trial_name: qwen3_4b_instr_cispo_lora
+  wandb:
+    mode: online
+    project: codescout-platoon-tinker
+    entity: null
+    tags:
+      - codescout
+      - tinker
