@@ -49,7 +49,7 @@ class OpenHandsEnv:
         self._conversation.send_message(self._task.goal)
         # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
         # FIXME: allow timeout to be configurable
-        self._run_thread = threading.Thread(target=self._conversation.run, kwargs={'timeout': 1400}, daemon=True)
+        self._run_thread = threading.Thread(target=self._conversation.run, kwargs={'timeout': 1600}, daemon=True)
         self._run_thread.start()
 
         traj_collection = current_trajectory_collection.get()

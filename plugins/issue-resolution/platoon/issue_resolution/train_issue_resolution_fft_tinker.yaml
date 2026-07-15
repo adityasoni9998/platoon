@@ -2,7 +2,7 @@
 train:
   model_name: Qwen/Qwen3-4B-Instruct-2507
   renderer_name: qwen3_instruct_exact
-  context_window_length: 32768
+  context_window_length: 65536
   batch_size: 32
   num_epochs: 1
   max_training_steps: null
@@ -24,7 +24,7 @@ train:
   workflow_config:
     group_size: 8
     rollout_config:
-      max_steps: 100
+      max_steps: 40
       output_dir: /data/user_data/adityabs/platoon_skyrl_tinker/codescout-cispo-lora_mi300
       verbose: true
       timeout: 1200
@@ -46,6 +46,9 @@ checkpoint:
 
 log_path: /data/user_data/adityabs/platoon_skyrl_tinker/logs
 tinker_base_url: null
+
+watchdog:
+  enabled: false
 
 stats:
   experiment_name: issue_resolution-platoon-tinker

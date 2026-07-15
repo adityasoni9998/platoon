@@ -13,7 +13,6 @@ from tinker_cookbook.renderers.base import (
     RenderedMessage,
     TextPart,
     ToolCall,
-    parse_response_for_stop_token,
     remove_thinking,
 )
 from tinker_cookbook.renderers.qwen3 import Qwen3InstructRenderer
@@ -21,6 +20,9 @@ from tinker_cookbook.renderers.qwen3 import Qwen3InstructRenderer
 
 _THINK_START = "<think>"
 _THINK_END = "</think>"
+_TOOL_CALL_START = "<tool_call>"
+_TOOL_CALL_END = "</tool_call>"
+_TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
 
 #FIXME: is this function really aligned with what qwen3 reasoning models do? Doesn't matter for qwen3-4B-instruct
 def _split_qwen_reasoning_content(content: str) -> tuple[list[ContentPart], str]:
@@ -32,6 +34,13 @@ def _split_qwen_reasoning_content(content: str) -> tuple[list[ContentPart], str]
     return ([{"type": "thinking", "thinking": thinking}] if thinking else []), remaining
 
 
+def _find_token(tokens: list[int], token: int, start: int = 0) -> int:
+    for idx in range(start, len(tokens)):
+        if tokens[idx] == token:
+            return idx
+    return -1
+
+
 class Qwen3InstructExactRenderer(Qwen3InstructRenderer):
     """Qwen3 instruct renderer that preserves HF tool-call whitespace exactly."""
 
@@ -41,6 +50,30 @@ class Qwen3InstructExactRenderer(Qwen3InstructRenderer):
             "arguments": json.loads(tool_call.function.arguments),
         }
         return f"<tool_call>\n{json.dumps(payload, ensure_ascii=False)}\n</tool_call>"
+
+    def _extract_tool_calls_vllm_style(self, model_output: str) -> tuple[str, list[ToolCall]] | None:
+        if _TOOL_CALL_START not in model_output:
+            return None
+
+        matches = _TOOL_CALL_RE.findall(model_output)
+        tool_calls: list[ToolCall] = []
+        for closed_body, eos_body in matches:
+            payload = json.loads(closed_body if closed_body else eos_body)
+            name = payload["name"]
+            arguments = payload["arguments"]
+            if not isinstance(name, str):
+                raise TypeError("Tool call name must be a string")
+            tool_calls.append(
+                ToolCall(
+                    function=ToolCall.FunctionBody(
+                        name=name,
+                        arguments=json.dumps(arguments, ensure_ascii=False),
+                    ),
+                )
+            )
+
+        content = model_output[: model_output.find(_TOOL_CALL_START)]
+        return content, tool_calls
 
     def render_message(self, message, ctx: RenderContext) -> RenderedMessage:
         maybe_newline = "\n" if ctx.idx > 0 else ""
@@ -165,25 +198,31 @@ class Qwen3InstructExactRenderer(Qwen3InstructRenderer):
         return tinker.ModelInput(chunks=chunks)
 
     def parse_response(self, response: list[int]):
-        parsed_message, parse_success = super().parse_response(response)
-        if not parse_success or not parsed_message.get("unparsed_tool_calls"):
-            return parsed_message, parse_success
-
         response = self._normalize_response_tokens(response)
-        assistant_message, parse_success = parse_response_for_stop_token(
-            response, self.tokenizer, self._end_message_token
-        )
-        if not parse_success:
-            return assistant_message, False
+        end_idx = _find_token(response, self._end_message_token)
+        response_body = response[:end_idx] if end_idx != -1 else response
+        model_output = self.tokenizer.decode(response_body)
 
-        assert isinstance(assistant_message["content"], str)
-        thinking_parts, content = _split_qwen_reasoning_content(assistant_message["content"])
+        tool_calls: list[ToolCall] = []
+        try:
+            extracted = self._extract_tool_calls_vllm_style(model_output)
+        except Exception:
+            extracted = None
+        if extracted is None:
+            content_text = model_output
+        else:
+            content_text, tool_calls = extracted
+
+        thinking_parts, content = _split_qwen_reasoning_content(content_text)
+        assistant_message = {"role": "assistant"}
         if thinking_parts:
             assistant_message["content"] = thinking_parts
             if content:
                 assistant_message["content"].append(TextPart(type="text", text=content))
         else:
             assistant_message["content"] = content
+        if tool_calls:
+            assistant_message["tool_calls"] = tool_calls
         return assistant_message, True
 
 

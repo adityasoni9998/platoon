@@ -700,7 +700,7 @@ class PlatoonTinkerRLTrainer:
                             name=f"forward_backward (microbatch {microbatch_num})",
                             heartbeat_interval=60.0,
                             watchdog=shared_state.watchdog,
-                            total_timeout=900.0,
+                            total_timeout=1200.0,
                         )
                     except Exception as e:
                         logger.exception(
@@ -746,7 +746,7 @@ class PlatoonTinkerRLTrainer:
                         name="optim_step",
                         heartbeat_interval=60.0,
                         watchdog=shared_state.watchdog,
-                        total_timeout=300.0,
+                        total_timeout=600.0,
                     )
                 except Exception as e:
                     logger.exception(

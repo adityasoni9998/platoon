@@ -1,4 +1,11 @@
 import os
+import logging
+
+logging.getLogger(
+    "openhands.sdk.conversation.impl.remote_conversation"
+).setLevel(logging.CRITICAL)
+
+import subprocess
 import json
 from jinja2 import Environment, FileSystemLoader
 import asyncio
@@ -21,8 +28,81 @@ import platform
 import uuid
 from openhands.tools.terminal import TerminalTool
 from platoon.train.tinker.fastapi_litellm_proxy import SESSION_HEADER, get_active_tinker_http_proxy
-
+import shutil
 logger = get_logger(__name__)
+
+_orig_start_container = ApptainerWorkspace._start_container
+
+
+def _patched_start_container(self) -> None:
+    """Drop apptainer child logs entirely when detach_logs is disabled."""
+    overlay_root_dir = self.forward_env[-1]
+    self.forward_env = self.forward_env[:-1]
+    if self.detach_logs:
+        return _orig_start_container(self)
+
+    env_args: list[str] = []
+    for key in self.forward_env:
+        if key in os.environ:
+            env_args += ["--env", f"{key}={os.environ[key]}"]
+
+    bind_args: list[str] = []
+    if self.mount_dir:
+        mount_path = "/workspace"
+        bind_args += ["--bind", f"{self.mount_dir}:{mount_path}"]
+        logger.info(
+            "Mounting host dir %s to container path %s",
+            self.mount_dir,
+            mount_path,
+        )
+    env_extra_binds = [
+        item.strip()
+        for item in os.getenv("OPENHANDS_APPTAINER_EXTRA_BINDS", "").split(",")
+        if item.strip()
+    ]
+    for bind_spec in [*self.extra_bind_mounts, *env_extra_binds]:
+        bind_args += ["--bind", bind_spec]
+        logger.info("Adding Apptainer bind mount: %s", bind_spec)
+
+    container_opts: list[str] = []
+    if self.use_fakeroot:
+        container_opts.append("--fakeroot")
+    if self.enable_docker_compat:
+        # container_opts.append("--compat")
+        container_opts.append("--containall")
+        container_opts.append("--no-eval")
+        container_opts.append("--no-init")
+        container_opts.append("--no-umask")
+        container_opts += ["--overlay", str(overlay_root_dir)]
+    if self.enable_gpu:
+        container_opts.append("--nv")
+    if self.disable_mount_locations:
+        for loc in self.disable_mount_locations:
+            container_opts += ["--no-mount", loc]
+
+    server_cmd = [
+        "apptainer",
+        "run",
+        *container_opts,
+        *env_args,
+        *bind_args,
+        self._sif_path,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(self.host_port),
+    ]
+
+    self._process = subprocess.Popen(
+        server_cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+
+ApptainerWorkspace._start_container = _patched_start_container  # type: ignore[method-assign]
 
 def detect_platform():
     """Detects the correct platform string."""
@@ -31,20 +111,35 @@ def detect_platform():
         return "linux/arm64"
     return "linux/amd64"
 
-def prepare_workspace(instance: dict) -> BaseWorkspace:
+def prepare_workspace(instance: dict, overlay_root_dir: str) -> BaseWorkspace:
+    forward_env_vars = ["DEBUG", overlay_root_dir]
     workspace_kwargs = {
         "working_dir": "/testbed",
         "platform": detect_platform(),
         "cache_dir": os.environ.get("APPTAINER_CACHEDIR", APPTAINER_CACHEDIR),
-        "detach_logs": True,
+        "detach_logs": False, #NOTE: Keep this False to use the patched _start_container method that suppresses logs and uses overlays instead of writable-tmpfs
         "health_check_timeout": 600,
+        "forward_env": forward_env_vars,
     }
     image_name = instance["image_name"].split("/")[-1]
     sif_path = f"{APPTAINER_CACHEDIR}/43376f1-93c33d0-{image_name}-source-minimal.sif" #TODO: fix this
     if not os.path.exists(sif_path):
         raise FileNotFoundError(f"Apptainer image not found at {sif_path}. Please ensure the image is built and available.")
     workspace_kwargs["sif_file"] = sif_path
-    workspace = ApptainerWorkspace(**workspace_kwargs)
+    NUM_RETRIES = 3
+    workspace = None
+    for i in range(NUM_RETRIES):
+        try:
+            workspace = ApptainerWorkspace(**workspace_kwargs)
+            break
+        except Exception as e:
+            if i == NUM_RETRIES - 1:
+                raise RuntimeError(f"Error preparing workspace for instance {instance['instance_id']}: {str(e)}")
+            try:
+                workspace.cleanup()
+            except:
+                pass
+            logger.warning(f"Workspace setup attempt {i + 1} failed, retrying...")
     for cmd in ENV_SETUP_COMMANDS:
         res = workspace.execute_command(cmd)
         if res.exit_code != 0:
@@ -53,9 +148,9 @@ def prepare_workspace(instance: dict) -> BaseWorkspace:
             )
         logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
     repo_path = f"/testbed"
-    logger.info(f"Repo path in Remote workspace: {repo_path}")
+    # logger.info(f"Repo path in Remote workspace: {repo_path}")
     instance["repo_path"] = repo_path
-
+    
     # NOTE: clean any uncommited tracked/untracked changes in repo so that they do not seep into our model patch and cause apply patch errors later
     workspace.execute_command(f"cd {repo_path} && git reset --hard")
     workspace.execute_command(f"cd {repo_path} && git clean -fd")
@@ -129,6 +224,12 @@ async def cleanup_resources(agent, env):
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = agent_wrapper_platoon = None
     tinker_proxy = get_active_tinker_http_proxy()
+    rollout_id = str(uuid.uuid4())
+    overlay_root_dir = Path(f"/tmp/rollout_overlay_{rollout_id}")
+    (overlay_root_dir / "upper").mkdir(parents=True, exist_ok=True)
+    (overlay_root_dir / "work").mkdir(parents=True, exist_ok=True)
+    overlay_root_dir = str(overlay_root_dir)
+
     tinker_proxy_session_id = str(uuid.uuid4()) if tinker_proxy is not None else None
     rollout_start = time.perf_counter()
     prepare_workspace_s: float | None = None
@@ -150,8 +251,8 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             cleanup_total_s += time.perf_counter() - cleanup_start
 
     try:
-        if config.verbose:
-            print(f"[run_rollout] Process {os.getpid()}: Starting rollout for task {task.id}", flush=True)
+        # if config.verbose:
+        #     print(f"[run_rollout] Process {os.getpid()}: Starting rollout for task {task.id}", flush=True)
         instance: dict = task.misc
         try:
             loop = asyncio.get_event_loop()
@@ -160,14 +261,15 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             workspace = await loop.run_in_executor(
                 None,  # Uses default ThreadPoolExecutor
                 prepare_workspace,
-                instance
+                instance,
+                overlay_root_dir
             )
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
         except Exception as e:
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
             status = "workspace_setup_failed"
             error_detail = str(e)
-            print(f"[run_rollout] Workspace setup failed for task {task.id}: {e}", flush=True)
+            # print(f"[run_rollout] Workspace setup failed for task {task.id}: {e}", flush=True)
             raise RuntimeError(
                 f"Workspace setup failed for task {task.id}: {e}"
             )        
@@ -203,11 +305,11 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             )
         )
 
-        rollout_task = asyncio.create_task(run_episode(agent_wrapper_platoon, env, timeout=300))
+        rollout_task = asyncio.create_task(run_episode(agent_wrapper_platoon, env, timeout=600))
         try:
             # Apply a hard timeout to the entire rollout, not just individual steps
             agent_loop_start = time.perf_counter()
-            traj = await asyncio.wait_for(rollout_task, timeout=1230)
+            traj = await asyncio.wait_for(rollout_task, timeout=1530)
             agent_loop_s = time.perf_counter() - agent_loop_start
         except asyncio.TimeoutError:
             agent_loop_s = time.perf_counter() - agent_loop_start
@@ -256,13 +358,15 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         raise
     finally:
         await run_cleanup()
+        try:
+            shutil.rmtree(overlay_root_dir)
+        except:
+            pass
         print(
             "ROLLOUT_TIMING "
             + json.dumps(
                 {
                     "task_id": task.id,
-                    "collection_id": collection_id,
-                    "pid": os.getpid(),
                     "status": status,
                     "error": error_detail,
                     "prepare_workspace_s": prepare_workspace_s,

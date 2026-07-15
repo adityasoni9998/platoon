@@ -25,15 +25,6 @@ class MonitorPaths:
     jsonl_path: Path
     png_path: Path
 
-
-def default_output_dir() -> Path:
-    return Path(
-        "/data/user_data/adityabs/platoon_skyrl_tinker/logs/"
-        "issue_resolution-platoon-tinker/"
-        "skyrl-flame-swerebench-fft-cispo-20260710-212549"
-    )
-
-
 def human_gib_from_kib(kib: int | float) -> float:
     return round(float(kib) / 1024.0 / 1024.0, 1)
 
@@ -297,7 +288,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=default_output_dir(),
+        required=True,
         help="Directory where monitor_resources.jsonl and monitor_resources.png are written.",
     )
     parser.add_argument(

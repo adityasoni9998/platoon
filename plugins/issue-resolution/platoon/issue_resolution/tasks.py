@@ -23,7 +23,7 @@ def load_data():
     global data_loaded, train_data_map, val_data_map
     if data_loaded:
         return train_data_map, val_data_map
-    dataset = load_dataset("nebius/SWE-rebench", split='filtered')
+    dataset = load_dataset("adityasoni17/SWE-rebench", split='filtered')
     
     dataset = dataset.to_pandas()
     np.random.seed(42)

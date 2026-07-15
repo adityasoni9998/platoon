@@ -4,6 +4,24 @@ import logging
 import sys
 from pathlib import Path
 
+def configure_plain_logging() -> None:
+    """Install plain stderr logging before dependencies auto-configure handlers."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
+    )
+
+    logging.getLogger("platoon").setLevel(logging.INFO)
+    logging.getLogger("openhands").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("litellm").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
+
+configure_plain_logging()
+
 from datasets import Dataset
 from platoon.issue_resolution.rollout import run_rollout
 from platoon.issue_resolution.tasks import get_task, load_data
@@ -12,15 +30,6 @@ from platoon.train.tinker.fastapi_litellm_proxy import FastAPILiteLLMTinkerHTTPP
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.utils.config import load_config
-
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
-logging.getLogger("platoon").setLevel(logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 async def main(args: list[str]):
     # Load config from YAML and CLI overrides

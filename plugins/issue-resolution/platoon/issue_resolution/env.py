@@ -1,10 +1,17 @@
+import asyncio
 import logging
 
+from openhands.sdk.event import LLMConvertibleEvent, MessageEvent
+from openhands.sdk.llm.message import content_to_str
 from openhands.sdk.workspace import BaseWorkspace
 
 from platoon.openhands.env import OpenHandsEnv
 from platoon.utils.openhands_utils import is_finished
 from platoon.issue_resolution.test_execution_reward.test_execution_reward import compute_test_execution_reward
+from platoon.issue_resolution.localization_reward.localization_reward import compute_localization_reward
+from platoon.issue_resolution.tool_error_reward.tool_json_error import compute_tool_json_error_reward
+from platoon.issue_resolution.tool_error_reward.agent_error_event import compute_agent_error_reward
+from platoon.issue_resolution.tool_error_reward.str_replace_errors import compute_str_replace_reward
 logger = logging.getLogger(__name__)
 
 def remove_binary_files_from_git():
@@ -43,6 +50,32 @@ def extract_patch_from_environment(
     git_patch = git_patch_result.stdout
     return git_patch
 
+# def _last_agent_turn_has_raw_tool_call_message(state) -> bool:
+#     events = state.conversation_state.events
+#     if not events:
+#         return False
+
+#     missing_response_id = object()
+#     last_llm_response_id = missing_response_id
+#     for event in reversed(events):
+#         if not isinstance(event, LLMConvertibleEvent):
+#             continue
+#         if event.source != "agent":
+#             break
+
+#         llm_response_id = getattr(event, "llm_response_id", None)
+#         if last_llm_response_id is missing_response_id:
+#             last_llm_response_id = llm_response_id
+#         elif llm_response_id != last_llm_response_id:
+#             break
+
+#         if isinstance(event, MessageEvent):
+#             text_parts = content_to_str(event.llm_message.content)
+#             message = "".join(text_parts)
+#             if any(marker in message for marker in TOOL_CALL_MARKERS):
+#                 return True
+#     return False
+
 class SWERebenchEnv(OpenHandsEnv):
     async def evaluate(self) -> tuple[float, dict]:
         if not is_finished(self._state):
@@ -66,6 +99,33 @@ class SWERebenchEnv(OpenHandsEnv):
         
         # Execute tests on Modal
         test_execution_reward, test_execution_info = await compute_test_execution_reward(model_patch, instance)
-        reward = test_execution_reward
         info.update(test_execution_info)
+        
+        # Compute Localization reward
+        localization_reward, localization_reward_info = compute_localization_reward(model_patch, instance)
+        info.update(localization_reward_info)
+
+        # Compute tool_json_error_reward
+        tool_json_error_reward, tool_json_error_reward_info = compute_tool_json_error_reward(self._conversation.state.events)
+        info.update(tool_json_error_reward_info)
+
+        # Compute agent_error_event_reward
+        agent_error_event_reward, agent_error_event_reward_info = compute_agent_error_reward(self._conversation.state.events)
+        info.update(agent_error_event_reward_info)
+
+        str_replace_reward, str_replace_reward_info = compute_str_replace_reward(self._conversation.state.events)
+        info.update(str_replace_reward_info)
+
+        # reward weights
+        TEST_EXECUTION_REWARD_WEIGHT = 0.70
+        LOCALIZATION_REWARD_WEIGHT = 0.15
+        TOOL_JSON_ERROR_REWARD_WEIGHT = 0.05
+        AGENT_ERROR_EVENT_REWARD_WEIGHT = 0.05
+        STR_REPLACE_REWARD_WEIGHT = 0.05
+
+        reward = (test_execution_reward * TEST_EXECUTION_REWARD_WEIGHT) + \
+                 (localization_reward * LOCALIZATION_REWARD_WEIGHT) + \
+                 (tool_json_error_reward * TOOL_JSON_ERROR_REWARD_WEIGHT) + \
+                 (agent_error_event_reward * AGENT_ERROR_EVENT_REWARD_WEIGHT) + \
+                 (str_replace_reward * STR_REPLACE_REWARD_WEIGHT)        
         return reward, info

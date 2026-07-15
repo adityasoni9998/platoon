@@ -40,7 +40,7 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
 
     if len(model_patch.strip()) == 0:
         composite_reward = compute_composite_reward(binary_reward, f2p_pass_fraction, p2p_fail_fraction)
-        return binary_reward, {"error": "Empty model patch ==> guaranteed to not resolve issues.", "binary_reward": binary_reward, "f2p_pass_fraction": f2p_pass_fraction, "p2p_fail_fraction": p2p_fail_fraction, "composite_reward": composite_reward}
+        return composite_reward, {"error": "Empty model patch ==> guaranteed to not resolve issues.", "binary_reward": binary_reward, "f2p_pass_fraction": f2p_pass_fraction, "p2p_fail_fraction": p2p_fail_fraction, "composite_reward": composite_reward}
 
     # Run tests on modal
     try:
@@ -98,4 +98,4 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
         "p2p_fail_fraction": p2p_fail_fraction,
         "composite_reward": composite_reward,
     })
-    return binary_reward, info
+    return composite_reward, info
