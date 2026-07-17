@@ -2,9 +2,9 @@
 train:
   model_name: Qwen/Qwen3-4B-Instruct-2507
   renderer_name: qwen3_instruct_exact
-  context_window_length: 65536
+  context_window_length: 32768
   batch_size: 32
-  num_epochs: 1
+  num_epochs: 20
   max_training_steps: null
   num_minibatches: 1
   num_microbatches: 1
@@ -24,7 +24,7 @@ train:
   workflow_config:
     group_size: 8
     rollout_config:
-      max_steps: 40
+      max_steps: 100
       output_dir: /data/user_data/adityabs/platoon_skyrl_tinker/codescout-cispo-lora_mi300
       verbose: true
       timeout: 1200
