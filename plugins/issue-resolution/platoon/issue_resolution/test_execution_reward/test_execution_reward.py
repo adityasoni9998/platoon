@@ -40,13 +40,13 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
 
     if len(model_patch.strip()) == 0:
         composite_reward = compute_composite_reward(binary_reward, f2p_pass_fraction, p2p_fail_fraction)
-        return composite_reward, {"error": "Empty model patch ==> guaranteed to not resolve issues.", "binary_reward": binary_reward, "f2p_pass_fraction": f2p_pass_fraction, "p2p_fail_fraction": p2p_fail_fraction, "composite_reward": composite_reward}
+        return binary_reward, {"error": "Empty model patch ==> guaranteed to not resolve issues.", "binary_reward": binary_reward, "f2p_pass_fraction": f2p_pass_fraction, "p2p_fail_fraction": p2p_fail_fraction, "composite_reward": composite_reward}
 
     # Run tests on modal
     try:
         run_id = f"rl-{uuid.uuid4().hex}"
         with modal.enable_output():
-            modal_fn = modal.Function.from_name("swerebenchv1-evaluation", "run_instance_modal")
+            modal_fn = modal.Function.from_name("swesmith-evaluation", "run_instance_modal")
             res = await modal_fn.remote.aio(
                 prediction={
                     KEY_INSTANCE_ID: instance[KEY_INSTANCE_ID],
@@ -59,6 +59,7 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
                 is_gold=False,
                 timeout=5*60,
                 verbose=False,
+                build_image_from_scratch=False,
             )
         info = {"model_patch": model_patch, "evaluation_logs": asdict(res)}
         try:
@@ -98,4 +99,4 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
         "p2p_fail_fraction": p2p_fail_fraction,
         "composite_reward": composite_reward,
     })
-    return composite_reward, info
+    return binary_reward, info

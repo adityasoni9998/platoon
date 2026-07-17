@@ -14,6 +14,7 @@ dependencies = [
     "openhands-workspace",
     "openhands-agent-server",
     "unidiff",
+    "swesmith",
     "swebench",
     "modal",
     "libcst == 1.5.0",
@@ -45,7 +46,6 @@ override-dependencies = [
 [tool.uv.sources]
 platoon = { path = "../..", editable = true }
 platoon-openhands = { path = "../openhands", editable = true }
-swebench = { git = "https://github.com/adityasoni9998/SWE-rebench-harness.git", rev = "1e5839bc9df38a4f495dac289241d49c4174db33"}
 openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-sdk" }
 openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-tools" }
 openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-workspace" }

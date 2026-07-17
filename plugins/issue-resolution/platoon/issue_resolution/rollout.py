@@ -11,7 +11,7 @@ from jinja2 import Environment, FileSystemLoader
 import asyncio
 import time
 from platoon.envs.base import Task
-from platoon.issue_resolution.env import SWERebenchEnv
+from platoon.issue_resolution.env import SWEBenchEnv
 from pathlib import Path
 from openhands.sdk import LLM, get_logger, Agent, Tool, AgentBase
 from openhands.tools import get_default_tools
@@ -150,10 +150,17 @@ def prepare_workspace(instance: dict, overlay_root_dir: str) -> BaseWorkspace:
     repo_path = f"/testbed"
     # logger.info(f"Repo path in Remote workspace: {repo_path}")
     instance["repo_path"] = repo_path
+
+    commit_id = instance["instance_id"]
+    git_fetch = workspace.execute_command(f"cd {repo_path} && git fetch", timeout=300)
+    assert git_fetch.exit_code == 0, f"git fetch failed: {git_fetch.stderr}"
+
+    checkout_commit = workspace.execute_command(f"cd {repo_path} && git checkout {commit_id}", timeout=300)
+    assert checkout_commit.exit_code == 0, f"git checkout failed: {checkout_commit.stderr}"
     
-    # NOTE: clean any uncommited tracked/untracked changes in repo so that they do not seep into our model patch and cause apply patch errors later
-    workspace.execute_command(f"cd {repo_path} && git reset --hard")
-    workspace.execute_command(f"cd {repo_path} && git clean -fd")
+    # # NOTE: clean any uncommited tracked/untracked changes in repo so that they do not seep into our model patch and cause apply patch errors later
+    # workspace.execute_command(f"cd {repo_path} && git reset --hard")
+    # workspace.execute_command(f"cd {repo_path} && git clean -fd")
     return workspace
 
 def get_instruction(
@@ -285,7 +292,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         llm: LLM = prepare_llm(config, tinker_proxy_session_id=tinker_proxy_session_id)
         agent: Agent = prepare_agent(llm)
         agent_wrapper_platoon: OpenHandsAgent = OpenHandsAgent()
-        env: SWERebenchEnv = SWERebenchEnv(task=task, agent=agent, workspace=workspace)
+        env: SWEBenchEnv = SWEBenchEnv(task=task, agent=agent, workspace=workspace)
 
         traj_collection = TrajectoryCollection()
         current_trajectory_collection.set(traj_collection)

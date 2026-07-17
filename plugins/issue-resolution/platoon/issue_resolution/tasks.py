@@ -23,7 +23,9 @@ def load_data():
     global data_loaded, train_data_map, val_data_map
     if data_loaded:
         return train_data_map, val_data_map
-    dataset = load_dataset("adityasoni17/SWE-rebench", split='filtered')
+    dataset_localization = load_dataset("adityasoni17/SWE-smith-py-code-search", split='train')
+    instances_map = {instance['instance_id']: instance for instance in dataset_localization}
+    dataset = load_dataset("SWE-bench/SWE-smith-py", split='train')
     
     dataset = dataset.to_pandas()
     np.random.seed(42)
@@ -31,10 +33,16 @@ def load_data():
     train_df = dataset.iloc[split_indices]
     val_df = dataset.iloc[~split_indices]
     for _, row in dataset.iterrows(): #TODO: fix this later
-        if len(row["problem_statement"]) > 0:
+        if row['instance_id'] not in instances_map:
+            continue
+        row["file_changes"] = instances_map[row['instance_id']]['file_changes']
+        if len(row["problem_statement"]) > 0: # and row['repo'] in repo_list:
             train_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
     for _, row in val_df.iterrows():
-        if len(row["problem_statement"]) > 0:
+        if row['instance_id'] not in instances_map:
+            continue
+        row["file_changes"] = instances_map[row['instance_id']]['file_changes']
+        if len(row["problem_statement"]) > 0: # and row['repo'] in repo_list:
             val_data_map[row['instance_id']] = create_task_from_instance(row.to_dict())
     data_loaded = True
     print(f"Loaded {len(train_data_map)} training instances and {len(val_data_map)} validation instances.", flush=True)
