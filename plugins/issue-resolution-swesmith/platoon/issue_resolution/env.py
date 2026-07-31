@@ -1,5 +1,7 @@
 import logging
 
+from openhands.sdk.event import ActionEvent
+from openhands.sdk.tool.builtins.finish import FinishAction
 from openhands.sdk.workspace import BaseWorkspace
 
 from platoon.openhands.env import OpenHandsEnv
@@ -50,6 +52,23 @@ class SWEBenchEnv(OpenHandsEnv):
     async def evaluate(self) -> tuple[float, dict]:
         if not is_finished(self._state):
             return 0.0, {}
+
+        finish_action = next(
+            (
+                event.action
+                for event in reversed(self._conversation.state.events)
+                if isinstance(event, ActionEvent)
+                and isinstance(event.action, FinishAction)
+            ),
+            None,
+        )
+        if finish_action is None:
+            return 0.0, {
+                "error": (
+                    "No FinishAction found in the conversation event stream; "
+                    "skipping patch evaluation."
+                )
+            }
 
         instance: dict = self._task.misc
 

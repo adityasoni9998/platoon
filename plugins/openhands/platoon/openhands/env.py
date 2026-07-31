@@ -105,19 +105,26 @@ class OpenHandsEnv:
                 error_message.set("Agent got stuck")
                 self._state.misc["error_message"] = error_message.get()
             elif self._state.conversation_state.execution_status == ConversationExecutionStatus.ERROR:
-                default_error_message = "Agent encountered an error"
-                # check if the agent failed due to exceeding max tokens
-                self.ignore_rollout = False
-                max_tokens_exceeded = False
-                for event in self._conversation.state.events:
-                    if isinstance(event, ConversationErrorEvent) and event.code == "LLMRateLimitError":
-                        max_tokens_exceeded = True
-                        break
-                if max_tokens_exceeded:
-                    error_message.set("Max tokens exceeded")
+                self.ignore_rollout = True
+                conversation_error = next(
+                    (
+                        event
+                        for event in reversed(self._conversation.state.events)
+                        if isinstance(event, ConversationErrorEvent)
+                    ),
+                    None,
+                )
+                if conversation_error is None:
+                    error_reason = "Agent encountered an unknown error"
                 else:
-                    error_message.set(default_error_message)
-                self._state.misc["error_message"] = error_message.get()
+                    code = conversation_error.code.strip()
+                    detail = conversation_error.detail.strip()
+                    if code and detail:
+                        error_reason = f"{code}: {detail}"
+                    else:
+                        error_reason = code or detail or "Agent encountered an unknown error"
+                error_message.set(error_reason)
+                self._state.misc["error_message"] = error_reason
 
         traj_collection = current_trajectory_collection.get()
         traj = current_trajectory.get()

@@ -43,6 +43,8 @@ def _find_free_port(host: str) -> int:
 
 
 def _is_context_window_error(exc: Exception) -> bool:
+    if isinstance(exc, ContextWindowExceededError):
+        return True
     message = str(exc).lower()
     return (
         "prompt length plus max_tokens exceeds the model's context window" in message
@@ -119,6 +121,16 @@ class FastAPILiteLLMTinkerHTTPProxyServer:
                     messages=messages,
                     **completion_kwargs,
                 )
+                # NOTE: Disable masking loss for overlong responses by commenting below block
+                # choices = response.get("choices") or []
+                # if choices and choices[0].get("finish_reason") == "length":
+                #     raise ContextWindowExceededError(
+                #         "This model's maximum context length is exceeded because "
+                #         "the maximum output length was reached; "
+                #         "finish_reason='length'.",
+                #         model=self.litellm_model_name,
+                #         llm_provider="platoon-tinker",
+                #     )
             except (ValueError, APIConnectionError, BadRequestError, ContextWindowExceededError) as e:
                 if _is_context_window_error(e):
                     raise HTTPException(status_code=400, detail=str(e)) from e

@@ -290,8 +290,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             agent_loop_s = time.perf_counter() - agent_loop_start
         except asyncio.TimeoutError:
             agent_loop_s = time.perf_counter() - agent_loop_start
-            status = "timeout"
-            error_detail = "rollout_timed_out"
+            env.ignore_rollout = True
+            status = "ignored_rollout"
+            error_detail = "Rollout timed out after 1800 seconds"
             if config.verbose:
                 print(f"Process {os.getpid()}: Rollout timed out for task {task.id}", flush=True)
             raise
@@ -304,17 +305,17 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             raise
 
         await run_cleanup()
-        # ignore_rollout: bool = False
-        # if env.ignore_rollout:
-        #     ignore_rollout = True
-        # finish_msg = traj.finish_message
-        # error_msg = traj.error_message
-        # if finish_msg is None or "Error in episode loop at step" in (error_msg or ""):
-        #     ignore_rollout = True
-        # if ignore_rollout:
-        #     status = "ignored_rollout"
-        #     error_detail = error_msg or "internal_errors"
-        #     raise RuntimeError(f"Rollout ignored for task {task.id} due to internal errors")
+        error_msg = traj.error_message
+        episode_loop_failed = "Error in episode loop at step" in (error_msg or "")
+        budget_exhausted = "Exhausted budget when running episode" in (
+            error_msg or ""
+        )
+        if env.ignore_rollout or episode_loop_failed or budget_exhausted:
+            status = "ignored_rollout"
+            error_detail = error_msg or "OpenHands conversation terminated with an error"
+            raise RuntimeError(
+                f"Rollout ignored for task {task.id}: {error_detail}"
+            )
         status = "success"
         if config.return_dict:
             result = current_trajectory_collection.get().to_dict()
