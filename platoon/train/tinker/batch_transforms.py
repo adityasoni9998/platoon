@@ -17,6 +17,22 @@ if TYPE_CHECKING:
     from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 
 
+# Workflow-to-trainer side channel matching AReaL's ``trainable_datums`` mask.
+# It is removed before datums are submitted to Tinker.
+TRAINABLE_DATUM_KEY = "_platoon_trainable_datum"
+
+
+def filter_trainable_datums(datums: list[tinker.Datum]) -> list[tinker.Datum]:
+    """Remove workflow-retained datums that must not enter the training objective."""
+
+    retained: list[tinker.Datum] = []
+    for datum in datums:
+        marker = datum.loss_fn_inputs.pop(TRAINABLE_DATUM_KEY, None)
+        if marker is None or bool(marker.to_torch().item()):
+            retained.append(datum)
+    return retained
+
+
 @dataclass(frozen=True)
 class BatchTransformContext:
     """Stable trainer-side context exposed to Tinker batch transforms."""

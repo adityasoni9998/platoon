@@ -15,6 +15,7 @@ import torch
 from tinker import TensorData
 
 from platoon.envs.base import Task
+from platoon.train.tinker.batch_transforms import TRAINABLE_DATUM_KEY
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo, TinkerLLMProxySession
 from platoon.utils.stats_tracker import get as get_tracker
@@ -221,6 +222,8 @@ class GroupRolloutWorkflow:
             if self.config.filter_zero_variance_groups:
                 return None
             logger.debug(f"Keeping zero-advantage datums for task {data['task_id']}")
+            for datum in all_data:
+                datum.loss_fn_inputs[TRAINABLE_DATUM_KEY] = TensorData.from_torch(torch.tensor(False))
 
         # Center advantages by rollout. The old_adv was set to trajectory_reward, so
         # this produces either reward - mean_reward or reward - loo_baseline.

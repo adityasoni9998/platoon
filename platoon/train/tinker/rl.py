@@ -21,6 +21,7 @@ from platoon.train.tinker.batch_transforms import (
     BatchTransform,
     BatchTransformContext,
     build_default_batch_transforms,
+    filter_trainable_datums,
     run_batch_transforms,
 )
 from platoon.train.tinker.config_defs import (
@@ -597,6 +598,17 @@ class PlatoonTinkerRLTrainer:
 
                     if len(task_rollout_results) == 0:
                         logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
+                        continue
+
+                    # Match AReaL's trainable_datums behavior: zero-variance
+                    # groups retained for rollout accounting do not participate
+                    # in transforms, loss normalization, metrics, or model work.
+                    task_rollout_results = filter_trainable_datums(task_rollout_results)
+                    if len(task_rollout_results) == 0:
+                        logger.warning(
+                            f"No trainable datums remained for microbatch {microbatch_num} "
+                            f"(minibatch {minibatch_num})"
+                        )
                         continue
 
                     task_rollout_results = run_batch_transforms(
