@@ -7,8 +7,9 @@ from openhands.sdk.workspace import BaseWorkspace
 from platoon.openhands.env import OpenHandsEnv
 from platoon.utils.openhands_utils import is_finished
 from platoon.issue_resolution.test_execution_reward.test_execution_reward import compute_test_execution_reward
-# from platoon.issue_resolution.localization_reward.localization_reward import compute_localization_reward
-# from platoon.issue_resolution.tool_error_reward.tool_json_error import compute_tool_json_error_reward
+from platoon.issue_resolution.localization_reward.localization_reward import compute_localization_reward
+from platoon.issue_resolution.tool_format_reward.tool_format_reward import compute_tool_format_reward
+# from .tool_error_reward.tool_json_error import compute_tool_json_error_reward
 # from platoon.issue_resolution.tool_error_reward.agent_error_event import compute_agent_error_reward
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,11 @@ class SWEBenchEnv(OpenHandsEnv):
         # Execute tests on Modal
         test_execution_reward, test_execution_info = await compute_test_execution_reward(model_patch, instance)
 
-        # # Compute Localization reward
-        # localization_reward, localization_reward_info = compute_localization_reward(model_patch, instance, "adityasoni17/SWE-smith-py-code-search", "train")
+        # Compute Localization reward
+        localization_reward, localization_reward_info = compute_localization_reward(model_patch, instance)
+
+        # Compute tool_format_reward
+        tool_format_reward, tool_format_reward_info = compute_tool_format_reward(self._conversation.state.events)
 
         # # Compute tool_json_error_reward
         # tool_json_error_reward, tool_json_error_reward_info = compute_tool_json_error_reward(self._conversation.state.events)
@@ -100,19 +104,17 @@ class SWEBenchEnv(OpenHandsEnv):
         # agent_error_event_reward, agent_error_event_reward_info = compute_agent_error_reward(self._conversation.state.events)
 
         # reward weights
-        # TEST_EXECUTION_REWARD_WEIGHT = 0.70
-        # LOCALIZATION_REWARD_WEIGHT = 0.20
-        # TOOL_JSON_ERROR_REWARD_WEIGHT = 0.05
+        TEST_EXECUTION_REWARD_WEIGHT = 0.70
+        LOCALIZATION_REWARD_WEIGHT = 0.20
+        TOOL_FORMAT_REWARD_WEIGHT = 0.10
         # AGENT_ERROR_EVENT_REWARD_WEIGHT = 0.05
 
-        # reward = (test_execution_reward * TEST_EXECUTION_REWARD_WEIGHT) + \
-        #          (localization_reward * LOCALIZATION_REWARD_WEIGHT) + \
-        #          (tool_json_error_reward * TOOL_JSON_ERROR_REWARD_WEIGHT) + \
-        #          (agent_error_event_reward * AGENT_ERROR_EVENT_REWARD_WEIGHT) 
-
-        reward = test_execution_reward
+        reward = (test_execution_reward * TEST_EXECUTION_REWARD_WEIGHT) + \
+                 (localization_reward * LOCALIZATION_REWARD_WEIGHT) + \
+                 (tool_format_reward * TOOL_FORMAT_REWARD_WEIGHT)
         info.update(test_execution_info)
-        # info.update(localization_reward_info)
+        info.update(localization_reward_info)
+        info.update(tool_format_reward_info)
         # info.update(tool_json_error_reward_info)
         # info.update(agent_error_event_reward_info)
         return reward, info

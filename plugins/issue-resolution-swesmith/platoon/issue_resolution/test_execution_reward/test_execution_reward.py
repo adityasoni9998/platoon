@@ -23,7 +23,7 @@ def extract_tests_status(report: object) -> dict | None:
     return None
 
 def compute_composite_reward(binary_reward: float, f2p_pass_fraction: float, p2p_fail_fraction: float) -> float:
-    return (0.5 * binary_reward) + (0.5 * ((0.8 * f2p_pass_fraction + 0.2 * (1.0 - p2p_fail_fraction))))
+    return (0.5 * binary_reward) + (0.5 * ((0.9 * f2p_pass_fraction + 0.1 * (1.0 - p2p_fail_fraction))))
 
 def count_items(value: object) -> int:
     if isinstance(value, list):
@@ -40,7 +40,7 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
 
     if len(model_patch.strip()) == 0:
         composite_reward = compute_composite_reward(binary_reward, f2p_pass_fraction, p2p_fail_fraction)
-        return binary_reward, {"error": "Empty model patch ==> guaranteed to not resolve issues.", "binary_reward": binary_reward, "f2p_pass_fraction": f2p_pass_fraction, "p2p_fail_fraction": p2p_fail_fraction, "composite_reward": composite_reward}
+        return composite_reward, {"error": "Empty model patch ==> guaranteed to not resolve issues.", "binary_reward": binary_reward, "f2p_pass_fraction": f2p_pass_fraction, "p2p_fail_fraction": p2p_fail_fraction, "composite_reward": composite_reward}
 
     # Run tests on modal
     try:
@@ -99,4 +99,4 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
         "p2p_fail_fraction": p2p_fail_fraction,
         "composite_reward": composite_reward,
     })
-    return binary_reward, info
+    return composite_reward, info
