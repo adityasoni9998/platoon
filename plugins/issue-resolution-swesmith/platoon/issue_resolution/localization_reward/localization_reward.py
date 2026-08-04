@@ -9,29 +9,50 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-APPTAINER_CACHEDIR = os.environ.get("APPTAINER_CACHEDIR", "/data/user_data/adityabs/apptainer_cache")
 LOCALIZATION_DIR = Path(__file__).resolve().parent
 REPO_ROOT = LOCALIZATION_DIR.parent.parent.parent
-HOST_PATCH = Path("/usr/bin/patch")
-HOST_PATCH_LIBS = [
-    Path("/lib64/libattr.so.1"),
-    Path("/lib64/libselinux.so.1"),
-    Path("/lib64/libc.so.6"),
-    Path("/lib64/libpcre2-8.so.0"),
-    Path("/lib64/ld-linux-x86-64.so.2"),
-]
+APPTAINER_EXECUTABLE = Path(
+    os.environ.get(
+        "APPTAINER_EXECUTABLE",
+        str(Path.home() / ".local/apptainer/bin/apptainer"),
+    )
+).expanduser()
+APPTAINER_SIF_DIR = Path(
+    os.environ.get(
+        "OPENHANDS_APPTAINER_BUILD_ROOT",
+        "/tmp/adityabs-apptainer/swesmith-build",
+    )
+).expanduser()
+HOST_PATCH = Path(
+    os.environ.get(
+        "LOCALIZATION_HOST_PATCH",
+        str(Path.home() / ".local/opt/gnu-patch/usr/bin/patch"),
+    )
+).expanduser()
 
 def stage_host_patch_tool():
     if not HOST_PATCH.exists():
         raise FileNotFoundError(f"Host patch binary not found: {HOST_PATCH}")
-    for lib in HOST_PATCH_LIBS:
-        if not lib.exists():
-            raise FileNotFoundError(f"Host patch dependency not found: {lib}")
+    if not HOST_PATCH.is_file() or not os.access(HOST_PATCH, os.X_OK):
+        raise PermissionError(f"Host patch binary is not executable: {HOST_PATCH}")
+
+
+def validate_apptainer_executable():
+    if not APPTAINER_EXECUTABLE.exists():
+        raise FileNotFoundError(
+            f"Apptainer executable not found: {APPTAINER_EXECUTABLE}"
+        )
+    if not APPTAINER_EXECUTABLE.is_file() or not os.access(
+        APPTAINER_EXECUTABLE, os.X_OK
+    ):
+        raise PermissionError(
+            f"Apptainer executable is not executable: {APPTAINER_EXECUTABLE}"
+        )
 
 
 def resolve_sif_path(instance):
     image_name = instance["image_name"].split("/")[-1]
-    sif_path = Path(APPTAINER_CACHEDIR) / f"43376f1-93c33d0-{image_name}-source-minimal.sif"
+    sif_path = APPTAINER_SIF_DIR / f"43376f1-93c33d0-{image_name}-source-minimal.sif"
     if not sif_path.exists():
         raise FileNotFoundError(f"Apptainer image not found: {sif_path}")
     return sif_path
@@ -39,9 +60,11 @@ def resolve_sif_path(instance):
 
 def localization_processing(model_patch: str, instance: dict):
     try:
+        validate_apptainer_executable()
         sif_path = resolve_sif_path(instance)
-    except FileNotFoundError:
-        return {}, "Apptainer SIF does not exist!", "error"
+        stage_host_patch_tool()
+    except (FileNotFoundError, PermissionError) as exc:
+        return {}, str(exc), "error"
 
     random_id = str(uuid.uuid4())
     patch_file_path = f"/tmp/{random_id}.patch"
@@ -54,15 +77,21 @@ def localization_processing(model_patch: str, instance: dict):
 
     venv_python = REPO_ROOT / ".venv" / "bin" / "python"
     python_executable = venv_python if venv_python.exists() else Path(sys.executable)
+    if python_executable.is_symlink():
+        python_link_target = Path(os.readlink(python_executable))
+        if not python_link_target.is_absolute():
+            python_link_target = python_executable.parent / python_link_target
+        python_install_root = python_link_target.parent.parent
+    else:
+        python_install_root = python_executable.resolve().parent.parent
     command = (
         "cd /testbed; git fetch origin; "
         f"git checkout {instance['instance_id']}; "
-        "/host_tools/lib64/ld-linux-x86-64.so.2 --library-path /host_tools/lib64 "
-        "/host_tools/patch --version >/tmp/patch_version.txt || true; "
+        "/host_tools/patch --version >/dev/null && "
         f"{python_executable} {LOCALIZATION_DIR / 'localization_patch_processing.py'} --id {random_id}"
     )
     apptainer_cmd = [
-        "apptainer",
+        str(APPTAINER_EXECUTABLE),
         "exec",
         "--fakeroot",
         "--cleanenv",
@@ -71,19 +100,11 @@ def localization_processing(model_patch: str, instance: dict):
         "--bind",
         f"{REPO_ROOT}:{REPO_ROOT}",
         "--bind",
+        f"{python_install_root}:{python_install_root}:ro",
+        "--bind",
         "/tmp:/tmp",
         "--bind",
         f"{HOST_PATCH}:/host_tools/patch:ro",
-        "--bind",
-        "/lib64/libattr.so.1:/host_tools/lib64/libattr.so.1:ro",
-        "--bind",
-        "/lib64/libselinux.so.1:/host_tools/lib64/libselinux.so.1:ro",
-        "--bind",
-        "/lib64/libc.so.6:/host_tools/lib64/libc.so.6:ro",
-        "--bind",
-        "/lib64/libpcre2-8.so.0:/host_tools/lib64/libpcre2-8.so.0:ro",
-        "--bind",
-        "/lib64/ld-linux-x86-64.so.2:/host_tools/lib64/ld-linux-x86-64.so.2:ro",
         str(sif_path),
         "env",
         f"PYTHONPATH={LOCALIZATION_DIR}",
@@ -109,7 +130,7 @@ def localization_processing(model_patch: str, instance: dict):
     cleanup_overlay(overlay_root)
     file_changes = edited_locations.get("file_changes", [])
     status = edited_locations.get("status", "error")
-    return file_changes, result.stdout, status
+    return file_changes, result.stdout + result.stderr, status
 
 def cleanup_overlay(overlay_root):
     import shutil

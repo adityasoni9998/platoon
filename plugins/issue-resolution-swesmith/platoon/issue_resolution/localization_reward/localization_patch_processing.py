@@ -422,9 +422,6 @@ def apply_patch_str(patch, apply_file_path, hunk_size):
     try:
         result = subprocess.run(
             [
-                '/host_tools/lib64/ld-linux-x86-64.so.2',
-                '--library-path',
-                '/host_tools/lib64',
                 '/host_tools/patch',
                 '-p1',
                 '-i',

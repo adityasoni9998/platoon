@@ -167,6 +167,11 @@ class GroupRolloutWorkflow(RolloutWorkflow, RemoteWorkflowSerializable):
         if self.config.use_subprocesses:
             results = await self._arun_episode_with_subprocesses(engine, data)
         else:
+            # Some task loaders perform expensive one-time dataset initialization.
+            # Finish that work off the event loop before opening proxy sessions;
+            # otherwise their 10-second start requests can time out after the
+            # proxy has already consumed the granted capacity and retry forever.
+            await asyncio.to_thread(self.get_task_fn, data["task_id"])
             results = await asyncio.gather(
                 *[self._arun_episode_single(engine, data, i) for i in range(self.config.group_size)]
             )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -1395,6 +1396,94 @@ def _patch_batch_task_dispatcher_idle_submit() -> None:
     BatchTaskDispatcher.active_submit_and_wait = _active_submit_and_wait_with_idle_guard
 
 
+def _patch_rollout_controller_least_loaded_workers() -> None:
+    """Route each new rollout group to the least-loaded inference worker.
+
+    Upstream AReaL round-robins group workflows without tracking when a worker
+    becomes free. With long, high-variance recursive groups, this can assign a
+    second group to a busy SGLang replica while a different replica sits idle.
+    Wrap the existing callback instead of copying its RPC/error logic so this
+    patch remains narrow and releases load accounting on every exit path.
+    """
+
+    from areal.infra.controller.rollout_controller import RolloutController  # pyright: ignore[reportMissingImports]
+
+    original_choose_worker = RolloutController._choose_worker
+    original_create_submit_callback = RolloutController._create_submit_callback
+    if getattr(original_choose_worker, "__platoon_least_loaded_worker_patch__", False):
+        return
+
+    task_context: contextvars.ContextVar[tuple[int, int] | None] = contextvars.ContextVar(
+        "platoon_rollout_worker_task", default=None
+    )
+
+    def _state(self):
+        state = getattr(self, "_platoon_worker_load_state", None)
+        if state is None or len(state["loads"]) != len(self.workers):
+            state = {
+                "loads": [0] * len(self.workers),
+                "assignments": {},
+                "lock": threading.Lock(),
+            }
+            self._platoon_worker_load_state = state
+        return state
+
+    @wraps(original_choose_worker)
+    def _choose_least_loaded_worker(self):
+        context = task_context.get()
+        if context is None or context[0] != id(self):
+            return original_choose_worker(self)
+        if not self.workers:
+            raise RuntimeError("No workers available to choose from.")
+
+        task_id = context[1]
+        state = _state(self)
+        with state["lock"]:
+            prior_rank = state["assignments"].get(task_id)
+            if prior_rank is not None:
+                return self.workers[prior_rank], prior_rank
+
+            minimum_load = min(state["loads"])
+            worker_count = len(self.workers)
+            start = self._current_worker_idx % worker_count
+            rank = start
+            for offset in range(worker_count):
+                candidate = (start + offset) % worker_count
+                if state["loads"][candidate] == minimum_load:
+                    rank = candidate
+                    break
+            state["loads"][rank] += 1
+            state["assignments"][task_id] = rank
+            self._current_worker_idx = (rank + 1) % worker_count
+        return self.workers[rank], rank
+
+    @wraps(original_create_submit_callback)
+    def _create_submit_callback_with_load_release(self, pending_task):
+        callback = original_create_submit_callback(self, pending_task)
+        task_id = pending_task.task_id
+
+        @wraps(callback)
+        async def _submit_then_wait_with_load_release():
+            token = task_context.set((id(self), task_id))
+            try:
+                return await callback()
+            finally:
+                task_context.reset(token)
+                state = getattr(self, "_platoon_worker_load_state", None)
+                if state is not None:
+                    with state["lock"]:
+                        rank = state["assignments"].pop(task_id, None)
+                        if rank is not None:
+                            state["loads"][rank] = max(0, state["loads"][rank] - 1)
+
+        return _submit_then_wait_with_load_release
+
+    _choose_least_loaded_worker.__platoon_least_loaded_worker_patch__ = True
+    _create_submit_callback_with_load_release.__platoon_least_loaded_worker_patch__ = True
+    RolloutController._choose_worker = _choose_least_loaded_worker
+    RolloutController._create_submit_callback = _create_submit_callback_with_load_release
+
+
 def _patch_local_scheduler_fork_ready_timeout() -> None:
     """Give forked proxy workers enough time to import and start serving.
 
@@ -1827,6 +1916,7 @@ def apply_all_patches() -> None:
     _patch_megatron_core_gdn_context_parallel_config_validation()
     _patch_megatron_core_gated_delta_net_context_parallel()
     _patch_batch_task_dispatcher_idle_submit()
+    _patch_rollout_controller_least_loaded_workers()
     _patch_local_scheduler_fork_ready_timeout()
     _patch_remote_inf_engine_asyncio_teardown_race()
     _patch_remote_inf_engine_proxy_resolution()

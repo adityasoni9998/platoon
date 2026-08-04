@@ -18,9 +18,7 @@ from platoon.visualization.event_sinks import JsonlFileSink
 from platoon.issue_resolution.tasks import EVAL_AGENT_SERVER_IMAGE, SDK_SHORT_SHA, ENV_SETUP_COMMANDS, USER_PROMPT_FILENAME, APPTAINER_CACHE_DIR
 from platoon.openhands.agent import OpenHandsAgent
 import platform
-import uuid
 from openhands.tools.terminal import TerminalTool
-from platoon.train.tinker.fastapi_litellm_proxy import SESSION_HEADER, get_active_tinker_http_proxy
 
 logger = get_logger(__name__)
 
@@ -82,7 +80,12 @@ def prepare_workspace(instance: dict) -> BaseWorkspace:
         "health_check_timeout": 600,
     }
     image_name = instance["image_name"].split("/")[-1]
-    sif_path = f"{APPTAINER_CACHE_DIR}/43376f1-93c33d0-{image_name}-source-minimal.sif"
+    sif_dir = Path(
+        os.environ.get("OPENHANDS_APPTAINER_BUILD_ROOT", APPTAINER_CACHE_DIR)
+    ).expanduser()
+    sif_path = str(
+        sif_dir / f"43376f1-93c33d0-{image_name}-source-minimal.sif"
+    )
     if sif_path is None:
         workspace_kwargs["server_image"] = agent_server_image_for_instance(instance)
     else:
@@ -151,35 +154,32 @@ def get_instruction(
     instruction = template.render(context)
     return instruction
 
-def prepare_llm(config: RolloutConfig, tinker_proxy_session_id: str | None = None) -> LLM:
+def prepare_llm(config: RolloutConfig) -> LLM:
     model_name = config.model_name
+    if not model_name:
+        raise ValueError("RolloutConfig.model_name must be set")
+
     temperature = config.inference_params.temperature
     if not model_name.startswith("openai/") and not model_name.startswith("litellm_proxy/"):
         model_name = "openai/" + model_name
 
-    active_proxy = get_active_tinker_http_proxy()
-    extra_headers = None
-    if tinker_proxy_session_id is not None:
-        extra_headers = {SESSION_HEADER: tinker_proxy_session_id}
-
-    llm=LLM(
-            usage_id="agent",
-            model=model_name,
-            num_retries=2,
-            base_url=config.model_endpoint,
-            api_key=config.model_api_key or "sk-xxx",
-            temperature=temperature,
-            max_input_tokens=active_proxy.context_window_length if active_proxy is not None else None,
-            max_output_tokens=config.inference_params.max_completion_tokens,
-            extra_headers=extra_headers,
-            litellm_extra_body={
-                "include_stop_str_in_output": False,
-                "chat_template_kwargs": {
-                    # "add_generation_prompt": True, #NOTE: setting this to true raises errors
-                    "enable_thinking": False
-                }
-            }
-        )
+    llm = LLM(
+        usage_id="agent",
+        model=model_name,
+        num_retries=2,
+        base_url=config.model_endpoint,
+        api_key=config.model_api_key or "sk-xxx",
+        temperature=temperature,
+        max_input_tokens=config.extra.get("max_input_tokens"),
+        max_output_tokens=config.inference_params.max_completion_tokens,
+        litellm_extra_body={
+            "include_stop_str_in_output": False,
+            "chat_template_kwargs": {
+                # "add_generation_prompt": True, #NOTE: setting this to true raises errors
+                "enable_thinking": False
+            },
+        },
+    )
     return llm
 
 def prepare_agent(llm: LLM) -> Agent:
@@ -197,8 +197,6 @@ async def cleanup_resources(agent, env):
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     agent = env = agent_wrapper_platoon = None
-    tinker_proxy = get_active_tinker_http_proxy()
-    tinker_proxy_session_id = str(uuid.uuid4()) if tinker_proxy is not None else None
     rollout_start = time.perf_counter()
     prepare_workspace_s: float | None = None
     prompt_build_s: float | None = None
@@ -258,7 +256,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         task.max_steps = config.max_steps if config.max_steps is not None else 100
 
         agent_init_start = time.perf_counter()
-        llm: LLM = prepare_llm(config, tinker_proxy_session_id=tinker_proxy_session_id)
+        llm: LLM = prepare_llm(config)
         agent: Agent = prepare_agent(llm)
         agent_wrapper_platoon: OpenHandsAgent = OpenHandsAgent()
         env: SWEBenchEnv = SWEBenchEnv(task=task, agent=agent, workspace=workspace)
@@ -318,20 +316,15 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             )
         status = "success"
         if config.return_dict:
-            result = current_trajectory_collection.get().to_dict()
-            if tinker_proxy is not None and tinker_proxy_session_id is not None:
-                result["_tinker_interactions"] = tinker_proxy.pop_interactions(tinker_proxy_session_id)
-            return result
+            return current_trajectory_collection.get().to_dict()
         else:
-            return current_trajectory_collection.get() 
+            return current_trajectory_collection.get()
     except Exception as e:
         if status == "started":
             status = "error"
             error_detail = str(e)
         if config.verbose:
             print(f"Error running rollout for task {task.id}: {e}", flush=True)
-        if tinker_proxy is not None and tinker_proxy_session_id is not None:
-            tinker_proxy.discard_session(tinker_proxy_session_id)
         await run_cleanup()
         raise
     finally:
