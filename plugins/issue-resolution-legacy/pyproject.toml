@@ -1,0 +1,92 @@
+[project]
+name = "issue-resolution-swesmith"
+version = "0.1.0"
+description = "Platoon plugin for training LLM agents with RL for issue resolution in GitHub repositories."
+requires-python = "~=3.12.0"
+authors = [
+    {name = "Aditya Bharat Soni", email = "adityabs@cs.cmu.edu"}
+]
+dependencies = [
+    "platoon >= 0.1.0",
+    "platoon-openhands >= 0.1.0",
+    "openhands-sdk",
+    "openhands-tools",
+    "openhands-workspace",
+    "openhands-agent-server",
+    "unidiff",
+    "swesmith",
+    "swebench",
+    "modal",
+    "libcst == 1.5.0"
+]
+[project.optional-dependencies]
+# Training backends - install one of these for training
+tinker = [
+    "platoon[tinker]",
+]
+# NOTE: areal backend requires uv for installation (not available on PyPI)
+areal = [
+    "platoon[areal]",
+]
+# Logging integrations
+wandb = [
+    "platoon[wandb]",
+]
+# uv-specific configuration
+[tool.uv]
+# tinker and areal backends are mutually exclusive
+conflicts = [
+    [
+        { extra = "tinker" },
+        { extra = "areal" },
+    ],
+]
+override-dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "openai>=2.8.0",
+    # Mirror AReaL HEAD's overrides because uv only honors overrides from the
+    # root project. Plain dependency pins arrive transitively from Platoon.
+    "soundfile>=0.12.1,<0.13.0",
+    "torchao==0.15.0",
+    "flash-attn-4>=4.0.0b4",
+    "transformers>=5.0.0,<=5.3.0",
+    "nvidia-cudnn-cu12==9.16.0.29; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "networkx==3.3.0",
+    "megatron-core==0.17.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "hydra-core==1.4.0.dev1",
+    "timm==1.0.16",
+    # AReaL's swanboard dependency pins rich<14, while OpenHands' browser-use
+    # dependency requires rich>=14. This matches the override used by the other
+    # AReaL + OpenHands plugins in this repository.
+    "rich==14.3.1",
+    # These optional CUDA-only Megatron dependencies do not reliably build on
+    # the compute nodes. FSDP does not need them; Megatron must provide them via
+    # its container or base image.
+    "transformer-engine; sys_platform == 'never'",
+    "nv-grouped-gemm; sys_platform == 'never'",
+    "mamba-ssm; sys_platform == 'never'",
+    "causal-conv1d; sys_platform == 'never'",
+    "nvidia-resiliency-ext; sys_platform == 'never'",
+]
+no-build-isolation-package = ["flash-attn", "causal-conv1d", "mamba-ssm"]
+[tool.uv.sources]
+platoon = { path = "../..", editable = true }
+platoon-openhands = { path = "../openhands", editable = true }
+openhands-sdk = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-sdk" }
+openhands-tools = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-tools" }
+openhands-workspace = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-workspace" }
+openhands-agent-server = { git = "https://github.com/OpenHands/software-agent-sdk.git", rev = "43376f1868ffd702746080714a59c16d3f69ec12", subdirectory = "openhands-agent-server" }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[tool.hatch.build.targets.wheel]
+packages = ["platoon"]
