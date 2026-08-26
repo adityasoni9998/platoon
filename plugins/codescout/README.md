@@ -91,8 +91,8 @@ python -m areal.launcher.local \
   --config platoon/codescout/train_codescout_areal.yaml
 ```
 
-The example retains the original CodeScout 1.7B RFT checkpoint and uses the
-current `GroupRolloutWorkflow` API with Areal's online proxy mode.
+The Areal configuration translates the CodeScout Tinker recipe to the current
+Areal schema and uses the standard inline `GroupRolloutWorkflow` path.
 
 ## Train with Tinker
 
