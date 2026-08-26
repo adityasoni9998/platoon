@@ -26,11 +26,29 @@ The plugin pins the OpenHands packages to
 
 ## Required network setup
 
-The OpenHands agent and its LLM client run inside Modal. The Areal configuration
-uses the default inline agent mode and the standard `GroupRolloutWorkflow`. This
-initial port assumes each worker proxy URL injected by Areal is already publicly
-reachable from Modal. Port forwarding, endpoint rewriting, and tunnel lifecycle
-management are intentionally deferred.
+The OpenHands agent and its LLM client run inside Modal. Areal remains in its
+default inline agent mode. After Areal starts its four DP proxy workers, the
+CodeScout trainer opens one background SSH ControlMaster to
+`adityabs@ogma.lti.cs.cmu.edu`. It requests four independent reverse forwards
+with remote port `0`, allowing Ogma to allocate an available public port for
+each worker.
+
+The resulting internal-proxy to Ogma URL map is serialized with the rollout
+workflow. Areal session creation and interaction export continue to use the
+internal proxy URL; only the LLM endpoint passed to OpenHands is replaced with
+the corresponding `http://ogma.lti.cs.cmu.edu:<allocated-port>` URL. The SSH
+connection and all four forwards are closed when training exits.
+
+This requires:
+
+- passwordless SSH authentication from the trainer host;
+- Ogma's SSH server to allow externally bound reverse forwards
+  (`GatewayPorts clientspecified` or `yes`);
+- Ogma's firewall to admit the allocated ports from Modal.
+
+The reverse forwards currently expose plain HTTP. Session bearer keys provide
+authentication but not transport encryption between Modal and Ogma. Use TLS
+termination on Ogma before treating this as suitable for an untrusted network.
 
 For Tinker there is one CodeScout proxy, so provide its complete public URL:
 
@@ -92,7 +110,7 @@ python -m areal.launcher.local \
 ```
 
 The Areal configuration translates the CodeScout Tinker recipe to the current
-Areal schema and uses the standard inline `GroupRolloutWorkflow` path.
+Areal schema and retains inline rollout execution.
 
 ## Train with Tinker
 

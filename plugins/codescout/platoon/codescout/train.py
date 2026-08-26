@@ -24,8 +24,9 @@ configure_plain_logging()
 from areal.api.cli_args import load_expr_config
 from datasets import Dataset
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
-from platoon.train.areal.workflows import GroupRolloutWorkflow
 
+from platoon.codescout.areal_workflow import OgmaRoutedGroupRolloutWorkflow
+from platoon.codescout.ogma_tunnel import OgmaReverseTunnelManager
 from platoon.codescout.rollout import run_rollout
 from platoon.codescout.tasks import get_task, load_data
 
@@ -42,17 +43,19 @@ def main(args: list[str]) -> None:
         train_dataset=train_dataset,
         val_dataset=None,
     ) as trainer:
-        train_workflow = GroupRolloutWorkflow(
-            rollout_fn=run_rollout,
-            get_task_fn=get_task,
-            config=config.workflow_config,
-            proxy_base_url=trainer.proxy_base_url,
-            proxy_admin_api_key=trainer.proxy_admin_api_key,
-            output_subdir="train_rollout",
-            filter_errors=False,
-        )
+        with OgmaReverseTunnelManager(trainer.rollout.proxy_addrs) as tunnels:
+            train_workflow = OgmaRoutedGroupRolloutWorkflow(
+                rollout_fn=run_rollout,
+                get_task_fn=get_task,
+                config=config.workflow_config,
+                proxy_base_url=trainer.proxy_base_url,
+                proxy_admin_api_key=trainer.proxy_admin_api_key,
+                output_subdir="train_rollout",
+                filter_errors=False,
+                proxy_endpoint_map=tunnels.endpoint_map,
+            )
 
-        trainer.train(workflow=train_workflow, eval_workflow=None)
+            trainer.train(workflow=train_workflow, eval_workflow=None)
 
 
 if __name__ == "__main__":
