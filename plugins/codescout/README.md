@@ -21,7 +21,7 @@ uv sync --project plugins/codescout --extra areal
 ```
 
 The plugin pins the OpenHands packages to
-`adityasoni9998/software-agent-sdk@0d404d2d804bc412d69ce13edf2aa6b6bed329a2`.
+`adityasoni9998/software-agent-sdk@29fafa4b5f0f41478b52f75b47423dfda99529d5`.
 `openhands-workspace[modal]` installs the required Modal client dependency.
 
 ## Required network setup
@@ -63,16 +63,26 @@ network and should not be exposed openly to the internet.
 
 ## Modal sandbox settings
 
-The default image is:
+The default published Modal image is:
 
 ```text
-docker.io/adityasoni8/codescout-agent-server-modal-workspace:codescout-modal-source-minimal
+docker.io__adityasoni8__codescout-agent-server-modal-workspace:29fafa4b
 ```
 
 It must contain the source agent-server at `/agent-server/.venv`, the CodeScout
 system prompt at `/app/prompts_codescout/system_prompt.j2`, the custom
-`LocalizationFinishTool`, Git, and ripgrep. Override it with
-`CODESCOUT_AGENT_SERVER_IMAGE` when using another compatible build.
+`LocalizationFinishTool`, Git, and ripgrep. The workspace resolves it with
+`modal.Image.from_name()`. Override it with `CODESCOUT_NAMED_AGENT_SERVER_IMAGE`
+when using another compatible published Modal image.
+
+Modal Sandbox V2 works through the same workspace code path. Opt into it in the
+trainer process before launching a run:
+
+```bash
+export MODAL_SANDBOX_V2=1
+```
+
+Leave the variable unset (or set it to `0`) to use V1.
 
 The runtime settings can be changed with these environment variables:
 
@@ -87,7 +97,7 @@ The runtime settings can be changed with these environment variables:
 | `MODAL_MEMORY` | `2048` | Memory in MiB per sandbox |
 | `MODAL_CLOUD` | unset | Optional cloud selection |
 | `MODAL_REGION` | unset | Optional region selection |
-| `MODAL_REGISTRY_SECRET_NAME` | unset | Secret for pulling a private image |
+| `MODAL_SANDBOX_V2` | unset | Set to `1` to use Modal Sandbox V2 |
 | `MODAL_EXPECTED_SERVER_GIT_SHA` | unset | Optional server revision check |
 | `MODAL_VERBOSE` | `0` | Enable Modal provisioning output |
 

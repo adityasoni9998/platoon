@@ -24,7 +24,7 @@ from platoon.visualization.event_sinks import JsonlFileSink
 from platoon.codescout.custom_tools.localization_finish import LocalizationFinishTool  # noqa: F401
 from platoon.codescout.env import CodeScoutEnv
 from platoon.codescout.tasks import (
-    EVAL_AGENT_SERVER_IMAGE,
+    EVAL_NAMED_AGENT_SERVER_IMAGE,
     NUM_RETRIES_SANDBOX_START,
     USER_PROMPT_FILENAME,
 )
@@ -57,19 +57,21 @@ def _get_active_tinker_proxy():
 def _modal_workspace(working_dir: str) -> ModalWorkspace:
     """Create one isolated Modal Sandbox for a CodeScout rollout."""
     return ModalWorkspace(
-        server_image=os.environ.get("CODESCOUT_AGENT_SERVER_IMAGE", EVAL_AGENT_SERVER_IMAGE),
+        named_server_image=os.environ.get(
+            "CODESCOUT_NAMED_AGENT_SERVER_IMAGE",
+            EVAL_NAMED_AGENT_SERVER_IMAGE,
+        ),
         target_type="source",
         app_name=os.environ.get("MODAL_APP_NAME", "codescout-agent-server"),
         modal_environment=_optional_env("MODAL_ENVIRONMENT"),
         working_dir=working_dir,
-        timeout=int(os.environ.get("MODAL_SANDBOX_TIMEOUT", "1800")),
+        timeout=int(os.environ.get("MODAL_SANDBOX_TIMEOUT", "800")),
         idle_timeout=_optional_int_env("MODAL_IDLE_TIMEOUT"),
-        startup_timeout=float(os.environ.get("MODAL_STARTUP_TIMEOUT", "600")),
-        cpu=float(os.environ.get("MODAL_CPU", "1")),
-        memory=int(os.environ.get("MODAL_MEMORY", "2048")),
+        startup_timeout=float(os.environ.get("MODAL_STARTUP_TIMEOUT", "300")),
+        cpu=float(os.environ.get("MODAL_CPU", "0.5")),
+        memory=int(os.environ.get("MODAL_MEMORY", "256")),
         cloud=_optional_env("MODAL_CLOUD"),
         region=_optional_env("MODAL_REGION"),
-        registry_secret_name=_optional_env("MODAL_REGISTRY_SECRET_NAME"),
         expected_server_git_sha=_optional_env("MODAL_EXPECTED_SERVER_GIT_SHA"),
         sandbox_tags={"purpose": "codescout-localization"},
         verbose=os.environ.get("MODAL_VERBOSE", "0").lower() in {"1", "true", "yes"},

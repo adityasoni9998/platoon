@@ -53,10 +53,10 @@ no-build-isolation-package = ["flash-attn", "causal-conv1d", "mamba-ssm"]
 [tool.uv.sources]
 platoon = { path = "../..", editable = true }
 platoon-openhands = { path = "../openhands", editable = true }
-openhands-sdk = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "0d404d2d804bc412d69ce13edf2aa6b6bed329a2", subdirectory = "openhands-sdk" }
-openhands-tools = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "0d404d2d804bc412d69ce13edf2aa6b6bed329a2", subdirectory = "openhands-tools" }
-openhands-workspace = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "0d404d2d804bc412d69ce13edf2aa6b6bed329a2", subdirectory = "openhands-workspace" }
-openhands-agent-server = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "0d404d2d804bc412d69ce13edf2aa6b6bed329a2", subdirectory = "openhands-agent-server" }
+openhands-sdk = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "29fafa4b5f0f41478b52f75b47423dfda99529d5", subdirectory = "openhands-sdk" }
+openhands-tools = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "29fafa4b5f0f41478b52f75b47423dfda99529d5", subdirectory = "openhands-tools" }
+openhands-workspace = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "29fafa4b5f0f41478b52f75b47423dfda99529d5", subdirectory = "openhands-workspace" }
+openhands-agent-server = { git = "https://github.com/adityasoni9998/software-agent-sdk.git", rev = "29fafa4b5f0f41478b52f75b47423dfda99529d5", subdirectory = "openhands-agent-server" }
 
 [tool.ruff]
 line-length = 100

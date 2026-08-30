@@ -4,8 +4,8 @@ import numpy as np
 from datasets import load_dataset
 from platoon.envs.base import Task
 
-EVAL_AGENT_SERVER_IMAGE = (
-    "docker.io/adityasoni8/codescout-agent-server-modal-workspace:codescout-modal-source-minimal"
+EVAL_NAMED_AGENT_SERVER_IMAGE = (
+    "docker.io__adityasoni8__codescout-agent-server-modal-workspace:29fafa4b"
 )
 USER_PROMPT_FILENAME = "user_prompt.j2"
 NUM_RETRIES_SANDBOX_START = 3
@@ -27,17 +27,21 @@ def load_data():
     if data_loaded:
         return train_data_map, val_data_map
 
-    dataset = load_dataset("adityasoni17/SWE-smith-py-code-search", split="train").to_pandas()
+    # Iterate over the Hugging Face dataset directly. Converting it to pandas
+    # turns nested lists such as edited_modules and edited_entities into NumPy
+    # arrays, which cannot be used with boolean expressions like ``value or []``
+    # during localization reward calculation.
+    dataset = load_dataset("adityasoni17/SWE-smith-py-code-search", split="train")
     np.random.seed(42)
     split_indices = np.random.rand(len(dataset)) < 0.9
-    train_df = dataset.iloc[split_indices]
-    val_df = dataset.iloc[~split_indices]
-    for _, row in train_df.iterrows():
-        if len(row["problem_statement"]) > 0:
-            train_data_map[row["instance_id"]] = create_task_from_instance(row.to_dict())
-    for _, row in val_df.iterrows():
-        if len(row["problem_statement"]) > 0:
-            val_data_map[row["instance_id"]] = create_task_from_instance(row.to_dict())
+    for row_index, source_row in enumerate(dataset):
+        if not source_row["problem_statement"]:
+            continue
+
+        row = dict(source_row)
+        train_data_map[row["instance_id"]] = create_task_from_instance(row)
+        if not split_indices[row_index]:
+            val_data_map[row["instance_id"]] = create_task_from_instance(dict(row))
     data_loaded = True
     print(
         f"Loaded {len(train_data_map)} training instances and "
