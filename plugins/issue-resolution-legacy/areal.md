@@ -5,10 +5,17 @@ FSDP backend on one 8-GPU node. Four GPUs are assigned to the FSDP actor and
 four GPUs are assigned to SGLang rollout inference. The total context window is
 32,768 tokens, including up to 30,720 prompt tokens and 2,048 completion tokens.
 
+This Modal recipe uses the exact 257-instance easy subset from Platoon commit
+`dd43ec0`, a binary resolved/not-resolved reward, and the easy-run rollout
+policy: completed rollouts are not discarded based on finish, error, or budget
+status. `filter_errors=False` likewise keeps their agent tokens. The existing
+trainer-side zero-variance group filtering remains active; groups retained for
+rollout accounting with zero advantages are removed before model work.
+
 ## Install
 
 ```bash
-cd /project/flame/adityabs/hyperion/plugins/issue-resolution-legacy
+cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-legacy
 
 uv sync --extra areal
 ```
@@ -18,11 +25,11 @@ to the same `uv sync` or `uv run` command.
 
 ## Optional checks
 
-Confirm that the GPUs, Apptainer, and the AReaL Python environment are visible:
+Confirm that the GPUs, Modal credentials, and the AReaL Python environment are visible:
 
 ```bash
 nvidia-smi
-apptainer --version
+uv run modal profile current
 
 uv run --extra areal python -c \
   "import areal; from platoon.train.areal import PlatoonArealRLTrainer; print('AReaL ready')"
@@ -44,38 +51,42 @@ needed. The YAML currently enables online WandB logging.
 Copy and run this block:
 
 ```bash
-cd /project/flame/adityabs/hyperion/plugins/issue-resolution-legacy
+cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-legacy
 source .venv/bin/activate
 
-export PATH="/home/adityabs/.local/apptainer/bin:/home/adityabs/.local/bin:$PATH"
-
-export APPTAINER_CACHEDIR="/tmp/adityabs-apptainer/cache"
-export APPTAINER_TMPDIR="/tmp/adityabs-apptainer/tmp"
-export OPENHANDS_APPTAINER_BUILD_ROOT="/tmp/adityabs-apptainer/swesmith-build"
-
-export APPTAINER_EXECUTABLE="/home/adityabs/.local/apptainer/bin/apptainer"
-export LOCALIZATION_HOST_PATCH="/home/adityabs/.local/opt/gnu-patch/usr/bin/patch"
-
-export HF_HOME="/tmp/adityabs-apptainer/hf-cache"
+export HF_HOME="/tmp/adityabs-swesmith/hf-cache"
 export OPENHANDS_SUPPRESS_BANNER=1
 
-mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$HF_HOME"
-chmod 700 "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+mkdir -p "$HF_HOME"
 
 # Set WANDB_API_KEY securely before launching, unless authentication was already
 # configured with `wandb login`. Do not commit a real key to this file.
 export trial="areal-flame-swesmith-fft-cispo-$(date +%Y%m%d-%H%M%S)"
 export WANDB_API_KEY="<your-wandb-api-key>"
 export ARROW_DEFAULT_MEMORY_POOL=system
-export OPENHANDS_APPTAINER_EXTRA_BINDS="/run/systemd/resolve/resolv.conf:/etc/resolv.conf"
 export SGLANG_FORWARD_UNKNOWN_TOOLS=true
+export MODAL_SANDBOX_V2=1
 uv run --extra areal python -m platoon.issue_resolution.train_areal \
   --config platoon/issue_resolution/train_issue_resolution_fft_areal_fsdp.yaml \
   trial_name="$trial"
 ```
 
-`APPTAINER_CACHEDIR` is Apptainer's internal cache. The prebuilt SWE-smith SIF
-files are kept separately under `OPENHANDS_APPTAINER_BUILD_ROOT`.
+Each rollout creates a Modal Sandbox from the pre-published named image for its
+SWE-Smith base image. The host must have working Modal credentials. It must also
+be able to authenticate non-interactively to `adityabs@ogma.lti.cs.cmu.edu`;
+training opens four reverse SSH forwards from Ogma to the four current AReaL
+proxy workers. The number of forwards intentionally matches the YAML's
+`sglang:d4p1t1` rollout topology.
+
+Modal resource defaults can be overridden with `MODAL_CPU`, `MODAL_MEMORY`,
+`MODAL_SANDBOX_TIMEOUT`, `MODAL_IDLE_TIMEOUT`, `MODAL_STARTUP_TIMEOUT`,
+`MODAL_CLOUD`, `MODAL_REGION`, and `MODAL_ENVIRONMENT`.
+Set `MODAL_SANDBOX_V2=1` in the trainer process to use Modal Sandbox V2, as in
+the launch block above.
+
+The named-image lookup mirrors the publisher in the `swe_smith_modal`
+benchmarks branch, including component shortening and hash suffixes, and uses
+the images built from software-agent-sdk commit `5acdf05`.
 
 Training artifacts, checkpoints, AReaL logs, and rollout event files are written
 under the configured `cluster.fileroot`, currently:

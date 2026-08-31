@@ -2,7 +2,7 @@ experiment_name: issue-resolution-platoon-areal
 trial_name: qwen3-4b-instruct-cispo-fsdp
 
 seed: 42
-total_train_epochs: 1
+total_train_epochs: 20
 tokenizer_path: ${actor.path}
 
 cluster:

@@ -48,7 +48,7 @@ app = modal.App("swesmith-evaluation")
 
 swesmith_image = (
     modal.Image.debian_slim()
-    .pip_install("swesmith", "tenacity", "unidiff", "datasets", "swebench")
+    .pip_install("swesmith", "tenacity", "unidiff", "datasets", "swebench==4.1.0")
     .run_commands(
         "mkdir -p /root/platoon/issue_resolution && touch /root/platoon/__init__.py && touch /root/platoon/issue_resolution/__init__.py"
     )
