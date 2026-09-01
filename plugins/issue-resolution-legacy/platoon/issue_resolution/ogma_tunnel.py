@@ -16,18 +16,14 @@ logger = logging.getLogger(__name__)
 OGMA_SSH_TARGET = "adityabs@ogma.lti.cs.cmu.edu"
 OGMA_PUBLIC_HOST = "ogma.lti.cs.cmu.edu"
 OGMA_REMOTE_BIND_ADDRESS = "0.0.0.0"
-EXPECTED_AREAL_PROXY_COUNT = 4
 
 
 class OgmaReverseTunnelManager:
-    """Own one SSH connection carrying four reverse proxy forwards."""
+    """Own one SSH connection carrying AReaL reverse proxy forwards."""
 
     def __init__(self, proxy_urls: list[str]) -> None:
-        if len(proxy_urls) != EXPECTED_AREAL_PROXY_COUNT:
-            raise ValueError(
-                f"Expected {EXPECTED_AREAL_PROXY_COUNT} AReaL proxy URLs, "
-                f"received {len(proxy_urls)}: {proxy_urls}"
-            )
+        if not proxy_urls:
+            raise ValueError("Expected at least one AReaL proxy URL")
         self.proxy_urls = list(proxy_urls)
         self.endpoint_map: dict[str, str] = {}
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None

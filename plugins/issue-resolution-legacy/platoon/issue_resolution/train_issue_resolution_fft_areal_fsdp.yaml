@@ -1,8 +1,8 @@
 experiment_name: issue-resolution-platoon-areal
-trial_name: qwen3-4b-instruct-cispo-fsdp
+trial_name: qwen3-4b-instruct-grpo-fsdp
 
 seed: 42
-total_train_epochs: 20
+total_train_epochs: 11
 tokenizer_path: ${actor.path}
 
 cluster:
@@ -24,7 +24,7 @@ rollout:
   max_concurrent_rollouts: 32
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
-  max_head_offpolicyness: 0
+  max_head_offpolicyness: 3
   enable_rollout_tracing: false
   agent:
     engine_max_tokens: 32768
@@ -49,10 +49,8 @@ workflow_config:
   filter_zero_variance_groups: false
 
 loss_fn_config:
-  loss_fn: cispo
-  loss_fn_kwargs:
-    clip_low_threshold: 0.0
-    clip_high_threshold: 5.0
+  loss_fn: grpo
+  loss_fn_kwargs: {}
 
 actor:
   backend: fsdp:d2p1t1c2
@@ -67,7 +65,7 @@ actor:
     max_tokens_per_mb: 65000
   optimizer:
     type: adam
-    lr: 3e-6
+    lr: 1e-6
     weight_decay: 0.017
     beta1: 0.9
     beta2: 0.95
