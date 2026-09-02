@@ -1,5 +1,5 @@
 experiment_name: issue-resolution-platoon-areal
-trial_name: qwen3-4b-instruct-cispo-fsdp-more-onpolicy
+trial_name: qwen3-4b-instruct-cispo-fsdp-more-onpolicy-highlr
 
 seed: 42
 total_train_epochs: 11
@@ -67,7 +67,7 @@ actor:
     max_tokens_per_mb: 65000
   optimizer:
     type: adam
-    lr: 1e-6
+    lr: 3e-6
     weight_decay: 0.017
     beta1: 0.9
     beta2: 0.95

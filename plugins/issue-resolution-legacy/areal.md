@@ -66,6 +66,11 @@ export WANDB_API_KEY="<your-wandb-api-key>"
 export ARROW_DEFAULT_MEMORY_POOL=system
 export SGLANG_FORWARD_UNKNOWN_TOOLS=true
 export MODAL_SANDBOX_V2=1
+
+# FlashInfer's JIT cache records absolute paths into the Python environment.
+# Clear stale build files so moving or recreating the venv cannot crash SGLang.
+uv run --extra areal python -m flashinfer clear-cache
+
 uv run --extra areal python -m platoon.issue_resolution.train_areal \
   --config platoon/issue_resolution/train_issue_resolution_fft_areal_fsdp.yaml \
   trial_name="$trial"
