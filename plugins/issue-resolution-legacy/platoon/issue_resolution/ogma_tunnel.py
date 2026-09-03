@@ -89,6 +89,8 @@ class OgmaReverseTunnelManager:
             "-o",
             "ExitOnForwardFailure=yes",
             "-o",
+            "ChannelTimeout=forwarded-tcpip=6m",
+            "-o",
             "ServerAliveInterval=30",
             "-o",
             "ServerAliveCountMax=3",
