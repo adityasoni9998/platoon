@@ -5,13 +5,44 @@ with AReaL and one `ModalWorkspace` per rollout. It uses the pre-published Modal
 named images produced by the `swerebench_modal` branch of
 `adityasoni9998/benchmarks`.
 
-The implementation intentionally keeps the legacy training behavior:
+The AReaL configuration uses a 65,000-token prompt-plus-completion context
+window, reserves 2,048 tokens for each completion (62,952 input tokens), and
+limits the agent to 40 iterations per rollout.
+
+The episode and OpenHands conversation use a 30-minute timeout. Each agent
+action/environment step still has a 10-minute timeout. The agent Sandbox
+defaults to the episode timeout plus 5 minutes for setup and cleanup
+(35 minutes total); `MODAL_SANDBOX_TIMEOUT` overrides that Sandbox lifetime.
+
+The training behavior is:
 
 - observations are masked and only agent completion tokens receive loss;
 - `filter_errors=False` keeps emitted agent tokens from completed rollouts;
 - completed rollouts are not rejected based on finish, error, or budget status;
-- the only environment reward is `1.0` when the SWE-rebench harness reports
-  `resolved`, otherwise `0.0`.
+- the binary reward is `1.0` when the SWE-rebench harness reports `resolved`,
+  otherwise `0.0`.
+
+Length reward is disabled for the initial run, so the total reward is just the
+binary reward. To enable it later, set
+`workflow_config.rollout_config.extra.enable_length_penalty: true` in YAML.
+When enabled, the total reward is `binary_reward + (threshold - turns) / (max_turns - threshold)`,
+with the length coefficient fixed at `1.0`. `turns` counts unique nonempty LLM
+response IDs on agent action/message events, so multiple tool calls from one
+response count as one turn. Set
+`workflow_config.rollout_config.extra.length_penalty_threshold` in YAML
+(default `10`); it must be an integer from zero up to, but excluding,
+`workflow_config.rollout_config.max_steps`. The formula is not clamped: with
+40 maximum turns, 1/10/25/40 turns yield length rewards of +0.3/0/−0.5/−1.
+The length term is computed from the OpenHands event stream alongside the
+binary reward in terminal `evaluate()` calls. The returned reward info records
+both components and the turn count. Partial trajectories that time out before
+terminal evaluation receive no additional length reward during cleanup.
+
+This does not guarantee that every rollout contributes loss. Groups with
+identical rewards are marked non-trainable and removed before model work,
+even with `filter_zero_variance_groups: false`. Steps without recorded
+completion IDs or trainable completion tokens are skipped, and rollouts that
+fail to return trajectory data cannot contribute training samples.
 
 The SDK dependencies are pinned to `5acdf05`, which is the revision embedded in
 the named images. The SWE-rebench harness is pinned to the fork commit
@@ -65,21 +96,20 @@ rollout.
 
 ```bash
 cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-rebench
-source .venv/bin/activate
-
-export HF_HOME="/tmp/adityabs-swerebench/hf-cache"
-export OPENHANDS_SUPPRESS_BANNER=1
-export ARROW_DEFAULT_MEMORY_POOL=system
-export SGLANG_FORWARD_UNKNOWN_TOOLS=true
-export MODAL_SANDBOX_V2=1
-mkdir -p "$HF_HOME"
-
-export trial="areal-flame-swerebench-fft-cispo-$(date +%Y%m%d-%H%M%S)"
-
-uv run --extra areal python -m platoon.issue_resolution.train_areal \
-  --config platoon/issue_resolution/train_issue_resolution_fft_areal_fsdp.yaml \
-  trial_name="$trial"
+./run_areal.sh
 ```
+
+The script installs/synchronizes the AReaL virtual environment at
+`/tmp/adityabs-swerebench/areal-venv` and uses it for both FlashInfer setup and
+training. Set `UV_PROJECT_ENVIRONMENT` to override that location. An activated
+repository `.venv` does not change which environment the launcher uses.
+
+The script configures the environment, clears stale FlashInfer builds, and
+launches training with a trial name ending in the short Git commit and UTC
+timestamp. It works from any directory and accepts additional `key=value`
+config overrides. It preserves existing HF cache, Sandbox timeout, and Ogma
+endpoint settings. Configure Modal/W&B authentication and deploy the evaluator
+before launching. Unset `SWEREBENCH_MAX_INSTANCES` for a full dataset run.
 
 The host must authenticate non-interactively to
 `adityabs@ogma.lti.cs.cmu.edu`. As in the legacy plugin, the launcher opens
@@ -97,10 +127,7 @@ five-minute timeout and Sandbox resource settings from `7cb00ef`.
 For a small training smoke test, add overrides such as:
 
 ```bash
-SWEREBENCH_MAX_INSTANCES=8 uv run --extra areal python -m \
-  platoon.issue_resolution.train_areal \
-  --config platoon/issue_resolution/train_issue_resolution_fft_areal_fsdp.yaml \
-  trial_name="debug-run" \
+SWEREBENCH_MAX_INSTANCES=8 ./run_areal.sh \
   total_train_epochs=1 \
   train_dataset.batch_size=8 \
   workflow_config.group_size=2 \

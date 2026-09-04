@@ -27,19 +27,21 @@ rollout:
   max_head_offpolicyness: 1
   enable_rollout_tracing: false
   agent:
-    engine_max_tokens: 32768
+    engine_max_tokens: 65000
 
 workflow_config:
   rollout_config:
     model_name: ${actor.path}
-    max_steps: 100
+    max_steps: 40
     output_dir: ${cluster.fileroot}/${experiment_name}/${trial_name}
     verbose: true
     train: true
-    timeout: 1230
+    timeout: 1800
     step_timeout: 600
     extra:
-      max_input_tokens: 30720
+      max_input_tokens: 62952
+      enable_length_penalty: false
+      length_penalty_threshold: 10
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048
@@ -68,7 +70,7 @@ actor:
     max_tokens_per_mb: 65000
   optimizer:
     type: adam
-    lr: 3e-6
+    lr: 1e-6
     weight_decay: 0.017
     beta1: 0.9
     beta2: 0.95
@@ -121,7 +123,7 @@ sglang:
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_running_requests: null
-  context_length: 32768
+  context_length: 65000
   max_prefill_tokens: 65000
   mem_fraction_static: 0.8
 

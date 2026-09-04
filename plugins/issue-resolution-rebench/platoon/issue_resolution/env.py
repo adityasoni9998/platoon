@@ -2,7 +2,7 @@ import logging
 
 from openhands.sdk.workspace import BaseWorkspace
 from platoon.openhands.env import OpenHandsEnv
-from platoon.utils.openhands_utils import is_finished
+from platoon.utils.openhands_utils import is_action, is_finished
 from platoon.issue_resolution.test_execution_reward.test_execution_reward import compute_test_execution_reward
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,28 @@ def extract_patch_from_environment(
     return git_patch
 
 class SWERebenchEnv(OpenHandsEnv):
+    def __init__(
+        self, task, agent, workspace, *, length_penalty_threshold: int,
+        enable_length_penalty: bool = False, **kwargs,
+    ):
+        max_turns = task.max_steps
+        if enable_length_penalty and (
+            not isinstance(length_penalty_threshold, int)
+            or isinstance(length_penalty_threshold, bool)
+            or max_turns is None
+            or not 0 <= length_penalty_threshold < max_turns
+        ):
+            raise ValueError("length_penalty_threshold must be an integer >= 0 and < task.max_steps")
+        super().__init__(task=task, agent=agent, workspace=workspace, **kwargs)
+        self._enable_length_penalty = enable_length_penalty
+        self._length_penalty_threshold = length_penalty_threshold
+
     async def evaluate(self) -> tuple[float, dict]:
         if not is_finished(self._state):
             return 0.0, {}
 
         instance: dict = self._task.misc
 
-        reward = 0.0
         info = {}
 
         # --- extract model patch ---
@@ -64,6 +79,28 @@ class SWERebenchEnv(OpenHandsEnv):
 
         # Execute tests on Modal
         test_execution_reward, test_execution_info = await compute_test_execution_reward(model_patch, instance)
-        reward = test_execution_reward
         info.update(test_execution_info)
+        if not self._enable_length_penalty:
+            return test_execution_reward, info
+
+        # One response may emit several tool calls or messages. Count it once.
+        response_ids = {
+            event.llm_response_id
+            for event in self._state.conversation_state.events
+            if is_action(event) and getattr(event, "llm_response_id", None)
+        }
+        num_turns = len(response_ids)
+        length_reward = (self._length_penalty_threshold - num_turns) / (
+            self._task.max_steps - self._length_penalty_threshold
+        )
+        length_reward_weight = 1.0
+        reward = test_execution_reward + length_reward_weight * length_reward
+        info.update(
+            binary_reward=test_execution_reward,
+            length_reward=length_reward,
+            length_reward_weight=length_reward_weight,
+            num_agent_turns=num_turns,
+            length_penalty_threshold=self._length_penalty_threshold,
+            total_reward=reward,
+        )
         return reward, info

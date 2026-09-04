@@ -43,7 +43,7 @@ def _optional_int_env(name: str) -> int | None:
     return int(value) if value is not None else None
 
 
-def _modal_workspace(instance: dict) -> ModalWorkspace:
+def _modal_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWorkspace:
     """Create an isolated workspace from the instance's published Modal image."""
     return ModalWorkspace(
         named_server_image=named_agent_server_image_for_instance(instance),
@@ -51,7 +51,8 @@ def _modal_workspace(instance: dict) -> ModalWorkspace:
         app_name=os.environ.get("MODAL_APP_NAME", "swerebench-agent-server"),
         modal_environment=_optional_env("MODAL_ENVIRONMENT"),
         working_dir="/testbed",
-        timeout=int(os.environ.get("MODAL_SANDBOX_TIMEOUT", "1400")),
+        # The sandbox also covers workspace setup and post-episode cleanup.
+        timeout=int(os.environ.get("MODAL_SANDBOX_TIMEOUT", str(rollout_timeout + 300))),
         idle_timeout=_optional_int_env("MODAL_IDLE_TIMEOUT"),
         startup_timeout=float(os.environ.get("MODAL_STARTUP_TIMEOUT", "600")),
         cpu=float(os.environ.get("MODAL_CPU", "0.125")),
@@ -64,7 +65,7 @@ def _modal_workspace(instance: dict) -> ModalWorkspace:
     )
 
 
-def prepare_workspace(instance: dict) -> ModalWorkspace:
+def prepare_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWorkspace:
     """Start a Modal workspace and validate its prebuilt SWE-rebench testbed."""
     instance_id = str(instance["instance_id"])
     repo_path = "/testbed"
@@ -74,7 +75,7 @@ def prepare_workspace(instance: dict) -> ModalWorkspace:
     for attempt in range(1, NUM_RETRIES_SANDBOX_START + 1):
         workspace: ModalWorkspace | None = None
         try:
-            workspace = _modal_workspace(instance)
+            workspace = _modal_workspace(instance, rollout_timeout=rollout_timeout)
             clean = workspace.execute_command(
                 f"cd {quoted_repo_path} && "
                 "git config --global --add safe.directory /testbed && "
@@ -153,6 +154,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     workspace: ModalWorkspace | None = None
     cleanup_done = False
     rollout_start = time.perf_counter()
+    rollout_timeout = config.timeout or 1800
     prepare_workspace_s: float | None = None
     prompt_build_s: float | None = None
     agent_init_s: float | None = None
@@ -191,7 +193,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         instance: dict = task.misc
         prepare_workspace_start = time.perf_counter()
         try:
-            workspace = await asyncio.to_thread(prepare_workspace, instance)
+            workspace = await asyncio.to_thread(prepare_workspace, instance, rollout_timeout=rollout_timeout)
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
         except Exception as error:
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
@@ -210,7 +212,14 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         agent_init_start = time.perf_counter()
         agent = prepare_agent(prepare_llm(config))
         agent_wrapper = OpenHandsAgent()
-        env = SWERebenchEnv(task=task, agent=agent, workspace=workspace)
+        env = SWERebenchEnv(
+            task=task,
+            agent=agent,
+            workspace=workspace,
+            conversation_timeout=rollout_timeout,
+            enable_length_penalty=config.extra.get("enable_length_penalty", False),
+            length_penalty_threshold=config.extra.get("length_penalty_threshold", 10),
+        )
         agent_init_s = time.perf_counter() - agent_init_start
 
         trajectory_collection = TrajectoryCollection()
@@ -229,7 +238,6 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             )
         )
 
-        rollout_timeout = config.timeout or 1230
         episode_task = asyncio.create_task(
             run_episode(agent_wrapper, env, timeout=config.step_timeout)
         )

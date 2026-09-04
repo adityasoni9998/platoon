@@ -118,6 +118,77 @@ def _patch_model_response_custom_stop_sequences() -> None:
     ModelResponse.output_tokens_without_stop = property(_output_tokens_without_custom_stop_error)
 
 
+def _patch_areal_openai_total_token_limit() -> None:
+    """Backport AReaL's engine-aware generation ``max_tokens`` fix.
+
+    AReaL revisions before ``7f3b021`` calculate ``max_new_tokens`` from the
+    configured engine context length, but omit the total-token value when they
+    construct ``GenerationHyperparameters``. Its 32,768-token default then
+    remains an independent, lower limit.
+
+    Keep the original request implementations intact. While either OpenAI
+    request path is building its ``ModelRequest``, carry that client's engine
+    limit in a task-local context and set ``gconfig.max_tokens`` at the common
+    request boundary. This matches the upstream calculation and remains safe
+    when requests with different limits execute concurrently.
+    """
+
+    import areal.experimental.openai.client as client_module  # pyright: ignore[reportMissingImports]
+
+    # AReaL versions containing the upstream fix already resolve and pass this
+    # value directly. Avoid changing those versions or stacking patches.
+    if hasattr(client_module, "_resolve_max_total_tokens"):
+        return
+
+    model_request_cls = client_module.ModelRequest
+    original_model_request_init = model_request_cls.__init__
+    if getattr(original_model_request_init, "__platoon_total_token_limit_patch__", False):
+        return
+
+    unset = object()
+    engine_max_tokens_context: contextvars.ContextVar[object] = contextvars.ContextVar(
+        "platoon_areal_engine_max_tokens",
+        default=unset,
+    )
+
+    @wraps(original_model_request_init)
+    def _model_request_init_with_total_token_limit(self, *args, **kwargs):
+        engine_max_tokens = engine_max_tokens_context.get()
+        if engine_max_tokens is not unset:
+            # ModelRequest fields are ordered rid, input_ids, gconfig. AReaL's
+            # OpenAI client uses keyword arguments, while positional handling
+            # keeps the patch compatible with direct construction and copies.
+            input_ids = kwargs.get("input_ids", args[1] if len(args) > 1 else None)
+            gconfig = kwargs.get("gconfig", args[2] if len(args) > 2 else None)
+            max_new_tokens = getattr(gconfig, "max_new_tokens", None)
+            if input_ids is not None and max_new_tokens is not None:
+                cap = int(engine_max_tokens) if engine_max_tokens is not None else 32768
+                gconfig.max_tokens = min(len(input_ids) + int(max_new_tokens), cap)
+        return original_model_request_init(self, *args, **kwargs)
+
+    _model_request_init_with_total_token_limit.__platoon_total_token_limit_patch__ = True
+    model_request_cls.__init__ = _model_request_init_with_total_token_limit
+
+    def _patch_create(request_cls) -> None:
+        original_create = request_cls.create
+        if getattr(original_create, "__platoon_total_token_limit_patch__", False):
+            return
+
+        @wraps(original_create)
+        async def _create_with_engine_max_tokens(self, *args, **kwargs):
+            token = engine_max_tokens_context.set(getattr(self, "engine_max_tokens", None))
+            try:
+                return await original_create(self, *args, **kwargs)
+            finally:
+                engine_max_tokens_context.reset(token)
+
+        _create_with_engine_max_tokens.__platoon_total_token_limit_patch__ = True
+        request_cls.create = _create_with_engine_max_tokens
+
+    _patch_create(client_module.AsyncCompletionsWithReward)
+    _patch_create(client_module.AsyncResponsesWithReward)
+
+
 def _patch_megatron_bridge_attention_backend() -> None:
     """Allow Platoon launchers to force Megatron Bridge attention backend.
 
@@ -1904,6 +1975,7 @@ def apply_all_patches() -> None:
 
     _patch_hf_tokenizer_download_race()
     _patch_model_response_custom_stop_sequences()
+    _patch_areal_openai_total_token_limit()
     _patch_triton_cache_for_qwen35_gdn_cp()
     _patch_megatron_bridge_attention_backend()
     _patch_megatron_bridge_qwen35_tp_validation()

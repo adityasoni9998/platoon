@@ -26,12 +26,20 @@ def _conversation_execution_status(conversation_state) -> ConversationExecutionS
     )
 
 class OpenHandsEnv:
-    def __init__(self, task: Task, agent: AgentBase, workspace: str | BaseWorkspace):
+    def __init__(
+        self,
+        task: Task,
+        agent: AgentBase,
+        workspace: str | BaseWorkspace,
+        *,
+        conversation_timeout: int = 1200,
+    ):
         self._task = task
         self._agent = agent
         if not isinstance(workspace, BaseWorkspace):
             workspace = str(workspace)
         self._workspace = workspace
+        self._conversation_timeout = conversation_timeout
         self._conversation = None
         self._run_thread: threading.Thread | None = None
         self.ignore_rollout = False
@@ -48,8 +56,11 @@ class OpenHandsEnv:
         self._state = OpenHandsObservation(task=self._task, conversation_state=self._conversation.state)
         self._conversation.send_message(self._task.goal)
         # NOTE: Run the conversation in a separate thread to avoid blocking the main thread.
-        # FIXME: allow timeout to be configurable
-        self._run_thread = threading.Thread(target=self._conversation.run, kwargs={'timeout': 1200}, daemon=True)
+        self._run_thread = threading.Thread(
+            target=self._conversation.run,
+            kwargs={'timeout': self._conversation_timeout},
+            daemon=True,
+        )
         self._run_thread.start()
 
         traj_collection = current_trajectory_collection.get()
