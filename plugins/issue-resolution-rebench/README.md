@@ -1,6 +1,6 @@
 # SWE-rebench issue-resolution training
 
-This plugin trains OpenHands on the `filtered` split of `nebius/SWE-rebench`
+This plugin trains OpenHands on the `filtered` split of `adityasoni17/SWE-rebench`
 with AReaL and one `ModalWorkspace` per rollout. It uses the pre-published Modal
 named images produced by the `swerebench_modal` branch of
 `adityasoni9998/benchmarks`.
@@ -22,10 +22,28 @@ The training behavior is:
 - the binary reward is `1.0` when the SWE-rebench harness reports `resolved`,
   otherwise `0.0`.
 
-Length reward is disabled for the initial run, so the total reward is just the
-binary reward. To enable it later, set
+Test execution reward is `0.5 * binary_reward + 0.5 * f2p_pass_fraction - 0.1 * p2p_fail_fraction`.
+Fractions come from the report's `tests_status` success/failure lists; empty or
+missing groups contribute zero. Empty patches and evaluation errors earn zero.
+Reward info includes the binary reward, both fractions, and `composite_reward`.
+
+OpenHands enforces the configured turn limit. This rollout disables Platoon's
+separate step budget, which counts the initial observation as a step, so it can
+consume all agent turns and evaluate the SDK's terminal state. Iteration-limit
+and context-limit errors use the same terminal evaluator as normal completion.
+Step and rollout timeouts still propagate after cleanup.
+
+Tool rewards follow upstream: no `AgentErrorEvent` earns 1, and a final agent
+response containing `<tool_call>` or `</tool_call>` earns 0 for JSON formatting
+(otherwise 1). File-editor reward is `1 - file_editor_fail_fraction`, using
+`ObservationEvent` results for `file_editor` with `observation.is_error`; no
+file-editor results earns 0. This includes all file-editor operations.
+
+Length reward is disabled for the initial run. The total reward uses upstream weights:
+`0.70 * composite_reward + 0.15 * localization_reward + 0.05 * tool_json_error_reward
++ 0.05 * agent_error_event_reward + 0.05 * str_replace_reward`. To enable length reward later, set
 `workflow_config.rollout_config.extra.enable_length_penalty: true` in YAML.
-When enabled, the total reward is `binary_reward + (threshold - turns) / (max_turns - threshold)`,
+When enabled, add `(threshold - turns) / (max_turns - threshold)` to that total,
 with the length coefficient fixed at `1.0`. `turns` counts unique nonempty LLM
 response IDs on agent action/message events, so multiple tool calls from one
 response count as one turn. Set
@@ -34,7 +52,7 @@ response count as one turn. Set
 `workflow_config.rollout_config.max_steps`. The formula is not clamped: with
 40 maximum turns, 1/10/25/40 turns yield length rewards of +0.3/0/−0.5/−1.
 The length term is computed from the OpenHands event stream alongside the
-binary reward in terminal `evaluate()` calls. The returned reward info records
+test execution reward in terminal `evaluate()` calls. The returned reward info records
 both components and the turn count. Partial trajectories that time out before
 terminal evaluation receive no additional length reward during cleanup.
 
@@ -143,3 +161,37 @@ SWEREBENCH_MAX_INSTANCES=8 ./run_areal.sh \
   rollout.max_concurrent_rollouts=4 \
   stats_logger.wandb.mode=disabled
 ```
+
+## Localization reward
+
+Terminal evaluation adds localization reward with weight 0.15. Its score is the
+arithmetic mean of file/module/entity F1 against the annotated dataset's
+`file_changes`. There are no new reward configuration options.
+
+Patch extraction remains in `env.py`, preserving the original staging and
+filtering. The diff now explicitly compares against `base_commit`, including
+agent-committed edits. Localization reads the edited files from `/testbed`,
+then hard-resets to `base_commit` and reads the original files. The captured
+patch remains available for the separate test evaluator. Terminal results are
+cached because localization resets the disposable workspace.
+
+All Git commands run inside Modal. Local parsing uses LibCST, unidiff, and Python's
+standard library, without local Git/GNU patch or target-project dependencies.
+Source capture/reset and all parsing helpers live together in
+`localization_reward/processing.py`, preserving helper order and formatting for
+a direct comparison with `ref.py`. The parser retains the upstream classification
+rules from Platoon commit
+`5f5b5042cbd03a5264185c113efcf23b8193f79c` (also matching `07a12cd`): added/deleted
+files and non-Python files are excluded; empty gold sets earn zero. Capture/parser
+errors return zero with details under `info["localization"]`.
+
+To reproduce the gold-patch localization smoke tests in an installed plugin venv:
+
+```bash
+python localization_smoke.py --count 8 --seed 20260907 --output analysis/localization-smoke.json
+```
+
+Each case uses a disposable Modal workspace, applies the gold patch, extracts it,
+reads after/before sources around a hard reset, and requires exact agreement with
+the three gold location sets. Reports retain patches, source snapshots, scores,
+and cleanup status. This tests localization, not test resolution.

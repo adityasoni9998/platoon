@@ -239,7 +239,10 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         )
 
         episode_task = asyncio.create_task(
-            run_episode(agent_wrapper, env, timeout=config.step_timeout)
+            # OpenHands enforces max_iteration_per_run=task.max_steps. Consume
+            # its terminal events and evaluate before closing the workspace.
+            # Platoon's budget also counts the initial observation-only step.
+            run_episode(agent_wrapper, env, timeout=config.step_timeout, enforce_step_budget=False)
         )
         agent_loop_start = time.perf_counter()
         try:

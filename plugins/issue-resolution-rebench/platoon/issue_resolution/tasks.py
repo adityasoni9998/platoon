@@ -11,7 +11,7 @@ import numpy as np
 from datasets import load_dataset
 from platoon.envs.base import Task
 
-DATASET_NAME = "nebius/SWE-rebench"
+DATASET_NAME = "adityasoni17/SWE-rebench"
 DATASET_SPLIT = "filtered"
 
 EVAL_AGENT_SERVER_IMAGE = "docker.io/adityasoni8/eval-agent-server"

@@ -18,7 +18,10 @@ from platoon.utils.span_profile import profile_span
 
 
 # NOTE: Call using asyncio.create_task() to make sure edits to contextvars do not leak to parent context
-async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: int | None = 300) -> Trajectory:
+async def run_episode(
+    agent: Agent, env: Env, verbose: bool = False, timeout: int | None = 300,
+    *, enforce_step_budget: bool = True,
+) -> Trajectory:
     try:
         step_count = 0
         set_context_vars(agent, env, timeout=timeout)
@@ -35,7 +38,7 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
             },
         ):
             obs = await env.reset()
-            while not halt_episode(obs):
+            while not halt_episode(obs, enforce_step_budget=enforce_step_budget):
                 action = await asyncio.wait_for(agent.act(obs), timeout=timeout)
                 obs = await asyncio.wait_for(env.step(action), timeout=timeout)
                 step_count += 1
@@ -54,6 +57,8 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
         if verbose:
             print(detailed_msg)
         error_message.set(detailed_msg)
+        if isinstance(e, (asyncio.TimeoutError, asyncio.CancelledError)):
+            raise
     finally:
         try:
             await agent.close()
@@ -70,7 +75,7 @@ async def run_episode(agent: Agent, env: Env, verbose: bool = False, timeout: in
         traj.finish_message = finish_message.get()
         # TODO: We could move trajectory finish logic (rewards, finish message, etc.) from env to here.
         traj_collection.finish_trajectory(traj.id)
-        return traj
+    return traj
 
 
 def set_context_vars(agent: Agent, env: Env, timeout: int | None):
@@ -90,8 +95,8 @@ def set_context_vars(agent: Agent, env: Env, timeout: int | None):
         budget_tracker.set(StepBudgetTracker())
 
 
-def halt_episode(obs: Observation) -> bool:
-    exhausted_budget = budget_tracker.get().remaining_budget() <= 0
+def halt_episode(obs: Observation, *, enforce_step_budget: bool = True) -> bool:
+    exhausted_budget = enforce_step_budget and budget_tracker.get().remaining_budget() <= 0
     if exhausted_budget:
         error_message.set("WARNING: Exhausted budget when running episode. Halting episode; task may be incomplete.")
     if finish_message.get(None) is not None:

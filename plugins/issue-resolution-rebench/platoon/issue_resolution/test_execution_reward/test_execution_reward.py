@@ -18,14 +18,40 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 
+def extract_tests_status(report: object) -> dict | None:
+    if not isinstance(report, dict):
+        return None
+    value = report.get("tests_status")
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def compute_composite_reward(binary_reward: float, f2p_pass_fraction: float, p2p_fail_fraction: float) -> float:
+    return 0.5 * binary_reward + 0.5 * f2p_pass_fraction - 0.1 * p2p_fail_fraction
+
+
+def count_items(value: object) -> int:
+    if isinstance(value, list):
+        return len(value)
+    return 0
+
+
 # Test execution reward: run evaluation of this patch on Modal
 async def compute_test_execution_reward(model_patch: str, instance: dict):
     # Empty model patch is guaranteed to fail, so skip evaluation on Modal.
     binary_reward = 0.0
+    tests_status = None
+    f2p_pass_fraction = 0.0
+    p2p_fail_fraction = 0.0
     if len(model_patch.strip()) == 0:
-        return binary_reward, {
+        composite_reward = compute_composite_reward(binary_reward, f2p_pass_fraction, p2p_fail_fraction)
+        return composite_reward, {
             "error": "Empty model patch ==> guaranteed to not resolve issues.",
             "binary_reward": binary_reward,
+            "f2p_pass_fraction": f2p_pass_fraction,
+            "p2p_fail_fraction": p2p_fail_fraction,
+            "composite_reward": composite_reward,
         }
 
     # Run tests on Modal.
@@ -52,6 +78,7 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
         info = {"model_patch": model_patch, "evaluation_logs": asdict(res)}
         try:
             binary_reward = 1.0 if res.resolved else 0.0
+            tests_status = extract_tests_status(res.report)
             info = {"model_patch": model_patch, "evaluation_logs": asdict(res)}
         except Exception as e:
             binary_reward = 0.0
@@ -68,5 +95,24 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
             ),
         }
 
-    info["binary_reward"] = binary_reward
-    return binary_reward, info
+    if tests_status is not None:
+        fail_to_pass = tests_status.get("FAIL_TO_PASS") or {}
+        f2p_success = count_items(fail_to_pass.get("success"))
+        f2p_failure = count_items(fail_to_pass.get("failure"))
+        f2p_total = f2p_success + f2p_failure
+        f2p_pass_fraction = f2p_success / f2p_total if f2p_total > 0 else 0.0
+
+        pass_to_pass = tests_status.get("PASS_TO_PASS") or {}
+        p2p_success = count_items(pass_to_pass.get("success"))
+        p2p_failure = count_items(pass_to_pass.get("failure"))
+        p2p_total = p2p_success + p2p_failure
+        p2p_fail_fraction = p2p_failure / p2p_total if p2p_total > 0 else 0.0
+
+    composite_reward = compute_composite_reward(binary_reward, f2p_pass_fraction, p2p_fail_fraction)
+    info.update({
+        "binary_reward": binary_reward,
+        "f2p_pass_fraction": f2p_pass_fraction,
+        "p2p_fail_fraction": p2p_fail_fraction,
+        "composite_reward": composite_reward,
+    })
+    return composite_reward, info
