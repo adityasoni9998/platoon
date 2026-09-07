@@ -5,8 +5,9 @@ set -euo pipefail
 rebench_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$rebench_dir"
 
-# Keep the experiment's Python environment on local /tmp storage.
+# Use the environment prepared with the README's one-time setup steps.
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/tmp/adityabs-swerebench/areal-venv}"
+source "$UV_PROJECT_ENVIRONMENT/bin/activate"
 
 # Configure Modal/W&B credentials and noninteractive SSH access before launch.
 export HF_HOME="${HF_HOME:-/tmp/adityabs-swerebench/hf-cache}"
@@ -20,13 +21,10 @@ rebench_commit="$(git rev-parse --short=8 HEAD)"
 rebench_timestamp="$(date -u +%Y%m%d-%H%M%SZ)"
 rebench_trial="qwen3-4b-instruct-cispo-fsdp-${rebench_commit}-${rebench_timestamp}"
 
-# Install/update the /tmp environment, even if another venv is activated.
-uv sync --no-active --extra areal
+# Clear build files that may refer to an older virtual environment.
+python -m flashinfer clear-cache
 
-# FlashInfer build files can retain paths from an older virtual environment.
-uv run --no-active --no-sync --extra areal python -m flashinfer clear-cache
-
-uv run --no-active --no-sync --extra areal python -m platoon.issue_resolution.train_areal \
+python -m platoon.issue_resolution.train_areal \
   --config platoon/issue_resolution/train_issue_resolution_fft_areal_fsdp.yaml \
   trial_name="$rebench_trial" \
   "$@"

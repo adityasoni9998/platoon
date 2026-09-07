@@ -15,8 +15,7 @@ from typing import Any
 
 import uuid
 
-# This process creates the test Sandbox from inside the deployed Modal
-# function, so the trainer process's environment does not reach this client.
+# The evaluator creates its test Sandbox inside the remote Modal function.
 os.environ["MODAL_SANDBOX_V2"] = "1"
 
 import modal
@@ -115,6 +114,7 @@ class ModalSandboxRuntime:
             timeout = 60 * 30
 
         return modal.Sandbox.create(
+            "sleep", "infinity",  # Named images may have no default CMD/ENTRYPOINT.
             image=self.image,
             timeout=timeout,
             cpu=4,
@@ -210,7 +210,13 @@ class ModalSandboxRuntime:
         )
         .add_local_file(
             LOCAL_SANDBOX_ENTRYPOINT_PATH,
-            REMOTE_SANDBOX_ENTRYPOINT_PATH,
+            # The deployed function resolves this file beside __file__ before
+            # mounting it at REMOTE_SANDBOX_ENTRYPOINT_PATH in the test Sandbox.
+            "/root/run_evaluation_modal_entrypoint.py",
+        )
+        .add_local_file(
+            LOCAL_SANDBOX_ENTRYPOINT_PATH,
+            "/root/platoon/issue_resolution/run_evaluation_modal_entrypoint.py",
         )
     ),
     timeout=120 * 60,  # Much larger than default timeout to account for image build time

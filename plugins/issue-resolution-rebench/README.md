@@ -49,14 +49,24 @@ the named images. The SWE-rebench harness is pinned to the fork commit
 `1e5839b` (package version 4.0.3), and Modal is pinned to 1.5.5. Do not update
 the SDK pin without rebuilding and republishing the named images.
 
-## Install
+## One-time environment setup
 
 ```bash
 cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-rebench
-uv sync --extra areal
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/tmp/adityabs-swerebench/areal-venv}"
+uv sync --no-active --extra areal
 ```
 
-## Deploy the binary reward evaluator
+This installs the training environment in `/tmp/adityabs-swerebench/areal-venv`.
+Repeat setup if that directory is removed (for example, after `/tmp` cleanup),
+or dependencies change. To use another location, export `UV_PROJECT_ENVIRONMENT`
+before setup and in each shell used for deployment or training. An activated
+repository `.venv` does not change which environment these commands use.
+
+Configure Modal/W&B authentication and noninteractive SSH access before
+training.
+
+## One-time deployment of the binary reward evaluator
 
 The training process calls the evaluator adapted from Platoon commit
 `7cb00ef`. It starts a clean Sandbox from the same pre-published named agent
@@ -64,11 +74,11 @@ image used by the rollout, applies the model patch, runs the SWE-rebench test
 script, and grades the output with the pinned harness fork. The evaluator
 removes the redundant dataset install command because the
 `swerebench-testbed-reinstall-v2` image layer has already run it from
-`/testbed` before publishing the named image. Deploy the evaluator once in the
-same Modal environment used for training:
+`/testbed` before publishing the named image. Deploy it once after environment
+setup, and redeploy when the evaluator code changes:
 
 ```bash
-uv run modal deploy \
+uv run --no-active --no-sync --extra areal modal deploy \
   platoon/issue_resolution/test_execution_reward/modal_test_execution.py
 ```
 
@@ -79,9 +89,9 @@ app name is `swerebenchv1-evaluation`.
 ## Preflight checks
 
 ```bash
-uv run modal profile current
+uv run --no-active --no-sync --extra areal modal profile current
 
-SWEREBENCH_MAX_INSTANCES=1 uv run python -c \
+SWEREBENCH_MAX_INSTANCES=1 uv run --no-active --no-sync --extra areal python -c \
   "from platoon.issue_resolution.tasks import load_data, named_agent_server_image_for_instance; train, _ = load_data(); task = next(iter(train.values())); print(task.id, named_agent_server_image_for_instance(task.misc))"
 ```
 
@@ -99,17 +109,16 @@ cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-rebench
 ./run_areal.sh
 ```
 
-The script installs/synchronizes the AReaL virtual environment at
-`/tmp/adityabs-swerebench/areal-venv` and uses it for both FlashInfer setup and
-training. Set `UV_PROJECT_ENVIRONMENT` to override that location. An activated
-repository `.venv` does not change which environment the launcher uses.
-
-The script configures the environment, clears stale FlashInfer builds, and
-launches training with a trial name ending in the short Git commit and UTC
+The script activates the prepared virtual environment, sets runtime environment
+variables, clears the FlashInfer cache before each launch, and starts training
+with a trial name ending in the short Git commit and UTC
 timestamp. It works from any directory and accepts additional `key=value`
 config overrides. It preserves existing HF cache, Sandbox timeout, and Ogma
-endpoint settings. Configure Modal/W&B authentication and deploy the evaluator
-before launching. Unset `SWEREBENCH_MAX_INSTANCES` for a full dataset run.
+endpoint settings. Complete the setup and deployment steps above before launching.
+Set `MODAL_ENVIRONMENT` to the environment where the evaluator was deployed.
+Unset `SWEREBENCH_MAX_INSTANCES` for a full dataset run.
+Activation applies to the script and its child processes; your calling shell's
+environment stays unchanged.
 
 The host must authenticate non-interactively to
 `adityabs@ogma.lti.cs.cmu.edu`. As in the legacy plugin, the launcher opens
@@ -118,7 +127,7 @@ Set `PLATOON_OGMA_SSH_TARGET` and `PLATOON_OGMA_PUBLIC_HOST` to override those
 defaults.
 
 Both agent-server and test-execution Sandboxes force Modal Sandbox V2 in code;
-the exported `MODAL_SANDBOX_V2=1` above is intentionally redundant for
+the launcher's exported `MODAL_SANDBOX_V2=1` is intentionally redundant for
 visibility. Rollout resources can be adjusted with `MODAL_CPU`, `MODAL_MEMORY`,
 `MODAL_SANDBOX_TIMEOUT`, `MODAL_IDLE_TIMEOUT`, `MODAL_STARTUP_TIMEOUT`,
 `MODAL_CLOUD`, and `MODAL_REGION`. The restored evaluator keeps the historical
