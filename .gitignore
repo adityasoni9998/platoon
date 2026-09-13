@@ -229,3 +229,4 @@ inference_results/
 .apex-wheels/
 *.deb
 analysis/
+artifacts/
