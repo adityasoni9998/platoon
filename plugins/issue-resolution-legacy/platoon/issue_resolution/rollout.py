@@ -146,7 +146,13 @@ def prepare_llm(config: RolloutConfig) -> LLM:
     if not model_name.startswith("openai/") and not model_name.startswith("litellm_proxy/"):
         model_name = "openai/" + model_name
 
+    # Backend adapters can add transport headers without coupling the rollout to a trainer.
+    transport_kwargs = {}
+    if config.extra.get("llm_extra_headers"):
+        transport_kwargs["extra_headers"] = config.extra["llm_extra_headers"]
+
     llm = LLM(
+        **transport_kwargs,
         usage_id="agent",
         model=model_name,
         num_retries=2,
@@ -178,7 +184,6 @@ def prepare_agent(llm: LLM) -> Agent:
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     env: SWEBenchEnv | None = None
     workspace: ModalWorkspace | None = None
-    cleanup_done = False
     rollout_start = time.perf_counter()
     prepare_workspace_s: float | None = None
     prompt_build_s: float | None = None
@@ -191,10 +196,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     collection_id: str | None = None
 
     async def run_cleanup() -> None:
-        nonlocal cleanup_done, cleanup_total_s
-        if cleanup_done:
-            return
-        cleanup_done = True
+        nonlocal cleanup_total_s
         cleanup_start = time.perf_counter()
         try:
             if env is not None:
@@ -289,17 +291,13 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         # trajectories based on finish/error/budget status. Keep them trainable;
         # only an exception or hard timeout prevents a rollout from returning.
         status = "success"
-        if config.return_dict:
-            return current_trajectory_collection.get().to_dict()
-        else:
-            return current_trajectory_collection.get()
+        return traj_collection.to_dict() if config.return_dict else traj_collection
     except Exception as e:
         if status == "started":
             status = "error"
             error_detail = str(e)
         if config.verbose:
             print(f"Error running rollout for task {task.id}: {e}", flush=True)
-        await run_cleanup()
         raise
     finally:
         await run_cleanup()

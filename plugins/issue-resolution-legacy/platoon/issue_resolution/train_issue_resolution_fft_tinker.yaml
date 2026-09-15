@@ -1,0 +1,78 @@
+# Legacy 257-instance easy SWE-Smith counterpart of the AReaL FSDP recipe.
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 32768
+  batch_size: 32
+  num_epochs: 11
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 1
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 100
+      # The workflow derives output_dir from log_path and the run names below.
+      verbose: true
+      train: true
+      timeout: 1230
+      step_timeout: 600
+      extra:
+        max_input_tokens: 30720
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+    filter_zero_variance_groups: false
+  # Both backends count task workflows here; each workflow launches group_size rollouts.
+  num_concurrent_rollout_workflow_workers: 32
+
+# Eval configuration
+eval:
+  strategy: none
+
+# Checkpoint configuration
+checkpoint:
+  strategy: step
+  every: 25
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+# Babel artifacts: <log_path>/<experiment_name>/<trial_name>/.
+# Checkpoint weights and optimizer state use the GPU server's --checkpoint-root.
+log_path: /data/user_data/adityabs/miles/experiments
+tinker_base_url: null
+
+stats:
+  experiment_name: easy_swesmith_257
+  trial_name: easy_swesmith257_mi300_subprocess_v1
+  wandb:
+    mode: online
+    project: issue_resolution-miles
+    entity: null
+    tags:
+      - issue_resolution
+      - miles-tinker
+
+# Public relay for Modal agents; independent of the training backend.
+inference_tunnel:
+  backend: modal  # Set to modal to create a temporary Modal router.
+  modal:
+    app_name: platoon-inference-router
+    cpu: 0.125
+    memory: 128
+    timeout: 86400

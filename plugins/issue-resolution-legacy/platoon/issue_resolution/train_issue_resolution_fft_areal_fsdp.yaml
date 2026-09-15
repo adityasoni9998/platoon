@@ -168,3 +168,12 @@ stats_logger:
       - issue_resolution
       - areal
       - fsdp
+
+# Public relay for Modal agents; independent of the training backend.
+inference_tunnel:
+  backend: modal  # Set to modal to create a temporary Modal router.
+  modal:
+    app_name: platoon-inference-router
+    cpu: 0.125
+    memory: 128
+    timeout: 86400

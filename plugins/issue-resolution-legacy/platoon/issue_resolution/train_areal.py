@@ -3,6 +3,7 @@
 
 import logging
 import sys
+from dataclasses import dataclass, field
 
 
 def configure_plain_logging() -> None:
@@ -27,15 +28,20 @@ from areal.api.cli_args import load_expr_config
 from datasets import Dataset
 from platoon.train.areal import PlatoonArealRLTrainer, PlatoonArealRLTrainerConfig
 
-from platoon.issue_resolution.areal_workflow import OgmaRoutedGroupRolloutWorkflow
-from platoon.issue_resolution.ogma_tunnel import OgmaReverseTunnelManager
+from platoon.issue_resolution.areal_workflow import RoutedGroupRolloutWorkflow
+from platoon.issue_resolution.inference_tunnel import InferenceTunnelConfig, inference_tunnels
 from platoon.issue_resolution.rollout import run_rollout
 from platoon.issue_resolution.tasks import get_task, load_data
 
 
+@dataclass
+class IssueResolutionArealConfig(PlatoonArealRLTrainerConfig):
+    inference_tunnel: InferenceTunnelConfig = field(default_factory=InferenceTunnelConfig)
+
+
 def main(args: list[str]) -> None:
-    config, _ = load_expr_config(args, PlatoonArealRLTrainerConfig)
-    config: PlatoonArealRLTrainerConfig = config
+    config, _ = load_expr_config(args, IssueResolutionArealConfig)
+    config: IssueResolutionArealConfig = config
 
     train_datamap, _ = load_data()
     train_dataset = Dataset.from_list([{"task_id": task_id} for task_id in train_datamap])
@@ -46,8 +52,8 @@ def main(args: list[str]) -> None:
         train_dataset=train_dataset,
         val_dataset=None,
     ) as trainer:
-        with OgmaReverseTunnelManager(trainer.rollout.proxy_addrs) as tunnels:
-            train_workflow = OgmaRoutedGroupRolloutWorkflow(
+        with inference_tunnels(trainer.rollout.proxy_addrs, config.inference_tunnel) as endpoints:
+            train_workflow = RoutedGroupRolloutWorkflow(
                 rollout_fn=run_rollout,
                 get_task_fn=get_task,
                 config=config.workflow_config,
@@ -55,7 +61,7 @@ def main(args: list[str]) -> None:
                 proxy_admin_api_key=trainer.proxy_admin_api_key,
                 output_subdir="train_rollout",
                 filter_errors=False,
-                proxy_endpoint_map=tunnels.endpoint_map,
+                proxy_endpoint_map=endpoints,
             )
 
             trainer.train(

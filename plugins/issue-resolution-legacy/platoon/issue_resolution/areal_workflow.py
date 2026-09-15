@@ -1,4 +1,4 @@
-"""AReaL workflow that routes Modal LLM calls through Ogma tunnels."""
+"""AReaL workflow that exposes worker inference URLs through public tunnels."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from platoon.train.areal.proxy import ArealProxySession
 from platoon.train.areal.workflows import GroupRolloutWorkflow
 
 
-class OgmaRoutedGroupRolloutWorkflow(GroupRolloutWorkflow):
-    """Keep session traffic internal while exposing the LLM endpoint via Ogma."""
+class RoutedGroupRolloutWorkflow(GroupRolloutWorkflow):
+    """Keep session traffic internal while exposing each worker's LLM endpoint."""
 
     def __init__(
         self,
@@ -37,7 +37,7 @@ class OgmaRoutedGroupRolloutWorkflow(GroupRolloutWorkflow):
             public_url = self.proxy_endpoint_map[internal_url]
         except KeyError as error:
             raise RuntimeError(
-                f"No Ogma tunnel registered for AReaL proxy {internal_url}; "
+                f"No tunnel registered for AReaL proxy {internal_url}; "
                 f"known proxies: {sorted(self.proxy_endpoint_map)}"
             ) from error
         config.rollout_config.model_endpoint = public_url

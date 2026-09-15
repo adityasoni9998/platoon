@@ -17,6 +17,7 @@ rollout accounting with zero advantages are removed before model work.
 ```bash
 cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-legacy
 
+export UV_PROJECT_ENVIRONMENT=/tmp/issue-resolution-legacy-areal-venv
 uv sync --extra areal
 ```
 
@@ -52,7 +53,8 @@ Copy and run this block:
 
 ```bash
 cd /project/flame/adityabs/hyperion_modal/plugins/issue-resolution-legacy
-source .venv/bin/activate
+export UV_PROJECT_ENVIRONMENT=/tmp/issue-resolution-legacy-areal-venv
+source "$UV_PROJECT_ENVIRONMENT/bin/activate"
 
 export HF_HOME="/tmp/adityabs-swesmith/hf-cache"
 export OPENHANDS_SUPPRESS_BANNER=1
@@ -79,7 +81,7 @@ uv run --extra areal python -m platoon.issue_resolution.train_areal \
 Each rollout creates a Modal Sandbox from the pre-published named image for its
 SWE-Smith base image. The host must have working Modal credentials. It must also
 be able to authenticate non-interactively to `adityabs@ogma.lti.cs.cmu.edu`;
-training opens four reverse SSH forwards from Ogma to the four current AReaL
+the default Ogma route opens four reverse SSH forwards from Ogma to the four current AReaL
 proxy workers. The number of forwards intentionally matches the YAML's
 `sglang:d4p1t1` rollout topology.
 
@@ -130,4 +132,22 @@ If a worker remains after shutdown, inspect its process before terminating it:
 
 ```bash
 ps -fu "$USER" | grep -E 'train_areal|areal|sglang' | grep -v grep
+```
+
+## Modal router alternative
+
+Set `inference_tunnel.backend: modal` in the YAML to route inference through a
+temporary Modal sandbox instead of Ogma. The default router requests 0.125 CPU
+and 128 MiB RAM, with a maximum lifetime of 24 hours. One router forwards all
+AReaL proxy workers, preserving internal session management. Omit the section
+or set `backend: ogma` to retain the existing route. See the shared
+[router settings and lifecycle](tinker.md#inference-transport).
+
+For a command-line override with the `neulab` profile:
+
+```bash
+export MODAL_PROFILE=neulab
+uv run --extra areal python -m platoon.issue_resolution.train_areal \
+  --config platoon/issue_resolution/train_issue_resolution_fft_areal_fsdp.yaml \
+  inference_tunnel.backend=modal
 ```
