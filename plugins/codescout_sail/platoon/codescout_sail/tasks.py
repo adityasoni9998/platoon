@@ -5,7 +5,8 @@ from datasets import load_dataset
 from platoon.envs.base import Task
 
 EVAL_AGENT_SERVER_IMAGE = (
-    "docker.io/adityasoni8/codescout-agent-server-sail-workspace:codescout-sail-source-minimal"
+    "docker.io/adityasoni8/codescout-agent-server-sail-workspace"
+    "@sha256:4cbd6c9b815dab1cb08a5fe85b1b7d1413bd1b6726d873f9b25003be0a765400"
 )
 USER_PROMPT_FILENAME = "user_prompt.j2"
 NUM_RETRIES_SANDBOX_START = 3

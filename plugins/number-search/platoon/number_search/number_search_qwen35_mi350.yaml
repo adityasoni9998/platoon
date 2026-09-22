@@ -1,0 +1,69 @@
+# Qwen3.5-4B full fine-tuning on the MI350 Miles-Tinker gateway.
+# Use the upstream built-in non-thinking renderer; no Hyperion Python changes.
+train:
+  model_name: Qwen/Qwen3.5-4B
+  renderer_name: qwen3_5_disable_thinking
+  context_window_length: 16384
+  batch_size: 8
+  num_epochs: null
+  max_training_steps: 30
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 0
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 10
+      output_dir: ./rollout_results
+      verbose: false
+      timeout: 300
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 512
+  num_concurrent_rollout_workflow_workers: 8
+eval:
+  strategy: step
+  every: 10
+  num_concurrent_rollout_workflow_workers: 16
+  workflow_config:
+    group_size: 1
+    rollout_config:
+      max_steps: 10
+      output_dir: ./eval_results
+      verbose: false
+      timeout: 300
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 512
+checkpoint:
+  strategy: step
+  every: 15
+  load_checkpoint_path: null
+log_path: /home/adityabs/hyperion_modal/outputs/qwen35-mi350-number-search
+tinker_base_url: http://127.0.0.1:10635
+stats:
+  experiment_name: number-search-qwen35-mi350
+  trial_name: qwen35-4b-no-thinking-cp1
+  wandb:
+    mode: online
+    project: number-search-platoon-tinker
+    entity: 9998_team
+    tags: [number-search, miles-tinker, qwen3.5-4b, mi350, full-finetune, no-thinking, dp1, cp1]
+    notes: 'Qwen3.5-4B MI350 validation. Built-in non-thinking renderer; synchronous batches; DP1/CP1; patched FLA kernel config and Megatron staging; IPython 9.6.0; no Hyperion Python changes.'

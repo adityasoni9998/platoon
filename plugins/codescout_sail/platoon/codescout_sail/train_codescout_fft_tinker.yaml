@@ -15,7 +15,7 @@ train:
     clip_low_threshold: 0.0
     clip_high_threshold: 5.0
   optimizer:
-    learning_rate: 1e-6
+    learning_rate: 3e-6
     beta1: 0.9
     beta2: 0.95
     eps: 1e-8
@@ -25,7 +25,8 @@ train:
     group_size: 8
     rollout_config:
       max_steps: 6
-      output_dir: /data/user_data/adityabs/platoon_skyrl_tinker/codescout-cispo-lora_mi300
+      # The trainer derives the final rollout directory from log_path and stats.
+      output_dir: /data/user_data/adityabs/miles_sail/rollouts
       verbose: true
       timeout: 600
       inference_params:
@@ -41,15 +42,25 @@ eval:
 # Checkpoint configuration
 checkpoint:
   strategy: step
-  every: 5
+  every: 25
   load_checkpoint_path: null
 
-log_path: /data/user_data/adityabs/platoon_skyrl_tinker/logs
-tinker_base_url: null
+# Logs, rollouts, W&B files, and checkpoints.jsonl live below this root.
+# Weight/optimizer files use the Tinker server's --checkpoint-root setting.
+log_path: /data/user_data/adityabs/miles_sail
+tinker_base_url: https://ta-01m2p0702dzjhx272cvtmagyrs-8080-5b431ywrgxj13rgbw5uh34vsv.w.modal.host
+
+inference_tunnel:
+  backend: modal
+  modal:
+    app_name: codescout-sail-inference-router
+    cpu: 0.125
+    memory: 128
+    timeout: 86400
 
 stats:
   experiment_name: codescout-platoon-tinker
-  trial_name: qwen3_4b_instr_cispo_lora
+  trial_name: qwen3_4b_cispo_sail
   wandb:
     mode: online
     project: codescout-platoon-tinker

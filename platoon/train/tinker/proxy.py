@@ -262,7 +262,9 @@ class TinkerLLM(CustomLLM):
         remaining: list[TinkerMessage]
         if messages and messages[0]["role"] == "system":
             content = messages[0].get("content") or ""
-            system_prompt = content if isinstance(content, str) else ""
+            # OpenHands sends text-block lists when native tool calling is enabled.
+            # Preserve those instructions when adding the renderer's tool schema.
+            system_prompt = self._normalize_message_content(content)
             remaining = list(messages[1:])
         else:
             remaining = list(messages)

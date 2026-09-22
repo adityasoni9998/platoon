@@ -80,7 +80,7 @@ def _sail_workspace(working_dir: str) -> SailWorkspace:
         startup_timeout=float(os.environ.get("SAIL_STARTUP_TIMEOUT", "600")),
         size=os.environ.get("SAILBOX_SIZE", "s"),
         memory_limit_gib=int(os.environ.get("SAILBOX_MEMORY_GIB", "2")),
-        disk_limit_gib=int(os.environ.get("SAILBOX_DISK_GIB", "16")),
+        disk_limit_gib=int(os.environ.get("SAILBOX_DISK_GIB", "8")),
         private=_bool_env("SAILBOX_PRIVATE"),
         inbound_allowlist=_optional_csv_env("SAILBOX_INBOUND_ALLOWLIST"),
         workspace_owner=_optional_env("SAIL_WORKSPACE_OWNER") or "10001:10001",
@@ -151,9 +151,9 @@ def prepare_llm(config: RolloutConfig, tinker_proxy_session_id: str | None = Non
         model_name = f"openai/{model_name}"
 
     active_proxy = _get_active_tinker_proxy()
-    extra_headers = None
+    extra_headers = dict(config.extra.get("llm_extra_headers", {}))
     if tinker_proxy_session_id is not None:
-        extra_headers = {"X-Platoon-Tinker-Session": tinker_proxy_session_id}
+        extra_headers["X-Platoon-Tinker-Session"] = tinker_proxy_session_id
 
     return LLM(
         usage_id="agent",
@@ -161,9 +161,13 @@ def prepare_llm(config: RolloutConfig, tinker_proxy_session_id: str | None = Non
         base_url=config.model_endpoint,
         api_key=config.model_api_key or "sk-xxx",
         temperature=config.inference_params.temperature,
-        max_input_tokens=(active_proxy.context_window_length if active_proxy is not None else None),
+        max_input_tokens=(
+            active_proxy.context_window_length
+            if active_proxy is not None
+            else config.extra.get("max_input_tokens")
+        ),
         max_output_tokens=config.inference_params.max_completion_tokens,
-        extra_headers=extra_headers,
+        extra_headers=extra_headers or None,
         litellm_extra_body={
             "include_stop_str_in_output": False,
             "chat_template_kwargs": {"enable_thinking": False},
