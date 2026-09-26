@@ -44,6 +44,7 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 from transformers import AutoProcessor, PreTrainedTokenizer
 
 from platoon.train.tinker.qwen3_exact_renderer import register_qwen3_exact_renderer
+from platoon.train.tinker.qwen35_renderer import register_qwen35_renderer
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +568,7 @@ def register_tinker_llm(
         image_processor = getattr(processor, "image_processor", None)
 
     register_qwen3_exact_renderer()
+    register_qwen35_renderer()
     renderer = get_renderer(renderer_name, tokenizer, image_processor=image_processor, model_name=model_name)
     for key, value in (renderer_kwargs or {}).items():
         if not hasattr(renderer, key):
