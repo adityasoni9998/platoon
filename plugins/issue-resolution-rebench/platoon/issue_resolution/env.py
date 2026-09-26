@@ -125,6 +125,8 @@ class SWERebenchEnv(OpenHandsEnv):
                  (tool_json_error_reward * TOOL_JSON_ERROR_REWARD_WEIGHT) + \
                  (agent_error_event_reward * AGENT_ERROR_EVENT_REWARD_WEIGHT) + \
                  (str_replace_reward * STR_REPLACE_REWARD_WEIGHT)
+        # Local sparse-ORM experiment: retain component diagnostics, train on resolution only.
+        reward = float(test_execution_info.get("binary_reward", 0.0))
         if not self._enable_length_penalty:
             self._terminal_result = (reward, info)
             return self._terminal_result

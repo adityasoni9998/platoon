@@ -133,6 +133,7 @@ def prepare_llm(config: RolloutConfig) -> LLM:
         temperature=config.inference_params.temperature,
         max_input_tokens=config.extra.get("max_input_tokens"),
         max_output_tokens=config.inference_params.max_completion_tokens,
+        extra_headers=config.extra.get("llm_extra_headers"),
         litellm_extra_body={
             "include_stop_str_in_output": False,
             "chat_template_kwargs": {"enable_thinking": False},
@@ -193,7 +194,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         instance: dict = task.misc
         prepare_workspace_start = time.perf_counter()
         try:
-            workspace = await asyncio.to_thread(prepare_workspace, instance, rollout_timeout=rollout_timeout)
+            workspace = await asyncio.to_thread(
+                prepare_workspace, instance, rollout_timeout=rollout_timeout
+            )
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
         except Exception as error:
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start

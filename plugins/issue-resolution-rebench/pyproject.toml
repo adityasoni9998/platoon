@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tinker = [
+    "platoon[tinker]",
+]
 areal = [
     "platoon[areal]",
 ]
@@ -31,6 +34,12 @@ wandb = [
 ]
 
 [tool.uv]
+conflicts = [
+    [
+        { extra = "tinker" },
+        { extra = "areal" },
+    ],
+]
 override-dependencies = [
     "fastapi[standard]>=0.115.0",
     "openai>=2.8.0",

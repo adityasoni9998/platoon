@@ -46,7 +46,7 @@ workflow_config:
       temperature: 1.0
       max_completion_tokens: 2048
   group_size: 8
-  use_subprocesses: false
+  use_subprocesses: true
   # Keep the legacy policy: retain groups for accounting, while the trainer's
   # trainable_datums mask removes zero-advantage groups before model work.
   filter_zero_variance_groups: false
