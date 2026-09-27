@@ -221,6 +221,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             workspace=workspace,
             conversation_timeout=rollout_timeout,
             enable_length_penalty=config.extra.get("enable_length_penalty", False),
+            use_binary_reward=config.extra.get("use_binary_reward", False),
             length_penalty_threshold=config.extra.get("length_penalty_threshold", 10),
         )
         agent_init_s = time.perf_counter() - agent_init_start

@@ -32,6 +32,7 @@ train:
       step_timeout: 600
       extra:
         max_input_tokens: 62952
+        use_binary_reward: true
         enable_length_penalty: false
         length_penalty_threshold: 10
       inference_params:

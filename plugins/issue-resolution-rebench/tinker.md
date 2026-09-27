@@ -41,6 +41,11 @@ Training settings are defined in
 [`train_issue_resolution_fft_tinker.yaml`](platoon/issue_resolution/train_issue_resolution_fft_tinker.yaml).
 Training overrides use the `--train.*` prefix.
 
+Set `train.workflow_config.rollout_config.extra.use_binary_reward` to `true`
+for resolved/not-resolved training rewards, or `false` for the existing weighted
+dense reward. All reward components are computed in either mode. The optional
+length reward is added separately; keep it disabled for purely binary rewards.
+
 The launcher automatically exposes its local Tinker proxy through a temporary
 Modal HTTPS router. Agents call that URL; the proxy calls the upstream
 `TINKER_BASE_URL`. No manual forwarding is needed. The router defaults to a
