@@ -1,0 +1,82 @@
+# SWE-rebench counterpart of the AReaL FSDP recipe.
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 65000
+  batch_size: 64
+  num_epochs: 2
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 1
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 40
+      # The workflow derives output_dir from log_path and the run names below.
+      verbose: true
+      train: true
+      timeout: 1800
+      step_timeout: 600
+      extra:
+        max_input_tokens: 62952
+        use_binary_reward: false
+        enable_length_penalty: false
+        length_penalty_threshold: 10
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+    filter_zero_variance_groups: false
+  # Both backends count task workflows here; each workflow launches group_size rollouts.
+  num_concurrent_rollout_workflow_workers: 64
+
+# Eval configuration
+eval:
+  strategy: none
+
+# Checkpoint configuration
+checkpoint:
+  strategy: step
+  every: 10
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+# Training artifacts: <log_path>/<experiment_name>/<trial_name>/.
+# Checkpoint weights and optimizer state use the GPU server's --checkpoint-root.
+log_path: /data/user_data/adityabs/miles_tinker_rebench/experiments
+tinker_base_url: null
+
+stats:
+  experiment_name: issue-resolution-rebench-tinker
+  trial_name: qwen3-4b-instruct-cispo
+  wandb:
+    mode: online
+    project: issue_resolution-miles
+    entity: null
+    tags:
+      - issue_resolution
+      - swe_rebench
+      - tinker
+
+# Public relay for Modal agents; independent of the training backend.
+inference_tunnel:
+  backend: modal
+  modal:
+    app_name: platoon-inference-router
+    cpu: 0.125
+    memory: 128
+    timeout: 86400

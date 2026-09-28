@@ -156,8 +156,9 @@ Both agent-server and test-execution Sandboxes force Modal Sandbox V2 in code;
 the launcher's exported `MODAL_SANDBOX_V2=1` is intentionally redundant for
 visibility. Rollout resources can be adjusted with `MODAL_CPU`, `MODAL_MEMORY`,
 `MODAL_SANDBOX_TIMEOUT`, `MODAL_IDLE_TIMEOUT`, `MODAL_STARTUP_TIMEOUT`,
-`MODAL_CLOUD`, and `MODAL_REGION`. The restored evaluator keeps the historical
-five-minute timeout and Sandbox resource settings from `7cb00ef`.
+`MODAL_CLOUD`, and `MODAL_REGION`. The evaluator keeps the historical
+five-minute timeout and requests 0.8 CPU and 128 MiB per test Sandbox.
+The `run_instance_modal` function requests 0.125 CPU with default memory.
 
 For a small training smoke test, add overrides such as:
 

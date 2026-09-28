@@ -117,7 +117,8 @@ class ModalSandboxRuntime:
             "sleep", "infinity",  # Named images may have no default CMD/ENTRYPOINT.
             image=self.image,
             timeout=timeout,
-            cpu=4,
+            cpu=0.8,
+            memory=128,
         )
     async def _read_stream(
         self,
@@ -219,6 +220,7 @@ class ModalSandboxRuntime:
             "/root/platoon/issue_resolution/run_evaluation_modal_entrypoint.py",
         )
     ),
+    cpu=0.125,
     timeout=120 * 60,  # Much larger than default timeout to account for image build time
     include_source=False,
 )

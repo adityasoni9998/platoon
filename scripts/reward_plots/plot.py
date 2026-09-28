@@ -17,14 +17,15 @@ from plot_reward_grids import main as render
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input_dir', type=Path)
-    parser.add_argument('--window', type=int, default=16)
+    parser.add_argument('--window', type=int, help='Averaging window (default: saved setting, or 16 for raw rollouts)')
+    parser.add_argument('--alignment', choices=['centered', 'trailing'])
     parser.add_argument('--skip-last-steps', type=int, default=2)
     parser.add_argument('--output-dir', type=Path, help='Output directory when processing raw rollouts')
     parser.add_argument('--horizontal', action='store_true')
     parser.add_argument('--smooth-only', action='store_true')
     parser.add_argument('--dynamic-ylim', action='store_true')
     args = parser.parse_args()
-    if args.window < 1 or args.skip_last_steps < 0:
+    if (args.window is not None and args.window < 1) or args.skip_last_steps < 0:
         parser.error('window must be positive and skip-last-steps must be nonnegative')
     original_argv = sys.argv
     try:
@@ -33,11 +34,16 @@ def main():
                 parser.error('--output-dir applies only to raw rollout input')
             output = args.input_dir
         else:
+            args.window = args.window or 16
             output = args.output_dir or args.input_dir.parent / f'group_reward_plots_centered_k{args.window}'
             sys.argv = ['plot_group_reward_metrics.py', str(args.input_dir), '--window', str(args.window),
                         '--skip-last-steps', str(args.skip_last_steps), '--output-dir', str(output)]
             aggregate()
         sys.argv = ['plot_reward_grids.py', str(output), '--combined']
+        if args.window is not None:
+            sys.argv.extend(['--window', str(args.window)])
+        if args.alignment:
+            sys.argv.extend(['--alignment', args.alignment])
         if args.horizontal:
             sys.argv.append('--horizontal')
         if args.smooth_only:

@@ -4,7 +4,7 @@ train:
   renderer_name: qwen3_instruct_exact
   context_window_length: 65000
   batch_size: 64
-  num_epochs: 1
+  num_epochs: 2
   max_training_steps: null
   num_minibatches: 1
   num_microbatches: 1
