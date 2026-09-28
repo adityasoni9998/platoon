@@ -51,8 +51,8 @@ def _modal_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWor
         app_name=os.environ.get("MODAL_APP_NAME", "swerebench-agent-server"),
         modal_environment=_optional_env("MODAL_ENVIRONMENT"),
         working_dir="/testbed",
-        # The sandbox also covers workspace setup and post-episode cleanup.
-        timeout=int(os.environ.get("MODAL_SANDBOX_TIMEOUT", str(rollout_timeout + 300))),
+        # Leave time after the conversation for reward evaluation and cleanup.
+        timeout=int(os.environ.get("MODAL_SANDBOX_TIMEOUT", str(rollout_timeout + 480))),
         idle_timeout=_optional_int_env("MODAL_IDLE_TIMEOUT"),
         startup_timeout=float(os.environ.get("MODAL_STARTUP_TIMEOUT", "600")),
         cpu=float(os.environ.get("MODAL_CPU", "0.125")),
@@ -156,6 +156,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     cleanup_done = False
     rollout_start = time.perf_counter()
     rollout_timeout = config.timeout or 1800
+    episode_timeout = rollout_timeout + 480
     prepare_workspace_s: float | None = None
     prompt_build_s: float | None = None
     agent_init_s: float | None = None
@@ -214,12 +215,12 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
 
         agent_init_start = time.perf_counter()
         agent = prepare_agent(prepare_llm(config))
-        agent_wrapper = OpenHandsAgent()
         env = SWERebenchEnv(
             task=task,
             agent=agent,
             workspace=workspace,
             conversation_timeout=rollout_timeout,
+            wait_for_completion=True,
             enable_length_penalty=config.extra.get("enable_length_penalty", False),
             use_binary_reward=config.extra.get("use_binary_reward", False),
             length_penalty_threshold=config.extra.get("length_penalty_threshold", 10),
@@ -242,20 +243,19 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             )
         )
 
+        # reset() waits for the run and freezes its events before act()/step().
+        # OpenHands enforces task.max_steps; consume the full history here.
         episode_task = asyncio.create_task(
-            # OpenHands enforces max_iteration_per_run=task.max_steps. Consume
-            # its terminal events and evaluate before closing the workspace.
-            # Platoon's budget also counts the initial observation-only step.
-            run_episode(agent_wrapper, env, timeout=config.step_timeout, enforce_step_budget=False)
+            run_episode(OpenHandsAgent(), env, timeout=config.step_timeout, enforce_step_budget=False)
         )
         agent_loop_start = time.perf_counter()
         try:
-            await asyncio.wait_for(episode_task, timeout=rollout_timeout)
+            await asyncio.wait_for(episode_task, timeout=episode_timeout)
             agent_loop_s = time.perf_counter() - agent_loop_start
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as error:
             agent_loop_s = time.perf_counter() - agent_loop_start
             status = "timeout"
-            error_detail = f"Rollout timed out after {rollout_timeout} seconds"
+            error_detail = str(error) or f"Rollout and evaluation timed out after {episode_timeout} seconds"
             raise
         except Exception as error:
             agent_loop_s = time.perf_counter() - agent_loop_start

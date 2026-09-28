@@ -53,12 +53,21 @@ Modal HTTPS router. Agents call that URL; the proxy calls the upstream
 
 Each rollout runs in a fresh subprocess with its own interaction session. The
 parent retains the proxy and collects the recorded training interactions.
-The subprocess deadline defaults to the episode timeout plus 180 seconds
-for imports, workspace setup, cleanup, and interpreter shutdown; override it with
+The subprocess deadline defaults to the conversation timeout plus 480 seconds
+for imports, workspace setup, reward evaluation, cleanup, and interpreter shutdown; override it with
 `--train.workflow_config.rollout_config.extra.subprocess_timeout SECONDS`.
 After the deadline or cancellation, the parent allows up to 180 additional
 seconds for child cleanup before a forced kill.
 The launcher stops the proxy and Modal router when training exits.
+
+The child waits for the `conversation.run()` thread to exit, then refreshes and
+reconciles once and freezes the events. The existing `reset/act/step` loop
+consumes that history, preserving completion IDs and tool-call grouping, and
+evaluates rewards once at the end. Steps appear in JSONL after the run exits;
+`step_timeout` still applies to each action/step, including final evaluation.
+Run failures use the underlying error message without the conversation-ID prefix.
+New subprocesses load this behavior immediately, but a running trainer keeps its
+already-loaded parent subprocess deadline until restart.
 
 Logs and checkpoint metadata go under
 `/data/user_data/adityabs/miles_tinker_rebench/experiments/issue-resolution-rebench-tinker/<trial_name>/`; change `--log_path`

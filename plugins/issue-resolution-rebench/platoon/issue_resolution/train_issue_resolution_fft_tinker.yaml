@@ -49,7 +49,7 @@ eval:
 # Checkpoint configuration
 checkpoint:
   strategy: step
-  every: 25
+  every: 10
   load_checkpoint_path: null
 
 watchdog:

@@ -62,9 +62,9 @@ class TinkerProxyRollout:
             try:
                 # Shield launch so cancellation cannot lose an already-created child.
                 process = await asyncio.shield(startup)
-                # Allow 180 seconds beyond the episode budget for imports,
-                # workspace setup, cleanup, and interpreter shutdown.
-                timeout = config.extra.get("subprocess_timeout", (config.timeout or 1800) + 180)
+                # Allow eight minutes beyond the conversation budget for
+                # setup, reward evaluation, cleanup, and interpreter shutdown.
+                timeout = config.extra.get("subprocess_timeout", (config.timeout or 1800) + 480)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=timeout)
                 except asyncio.TimeoutError as error:

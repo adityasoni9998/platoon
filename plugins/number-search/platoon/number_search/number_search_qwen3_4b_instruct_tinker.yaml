@@ -1,0 +1,55 @@
+# Qwen3-4B-Instruct number search validation on the MI350 Miles-Tinker gateway.
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 32768
+  batch_size: 32
+  num_epochs: null
+  max_training_steps: 50
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 10
+      output_dir: /tmp/rollout_results
+      verbose: false
+      timeout: 300
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 512
+  num_concurrent_rollout_workflow_workers: 32
+eval:
+  strategy: none
+  every: 0
+checkpoint:
+  strategy: step
+  every: 3
+  load_checkpoint_path: null
+log_path: /tmp/qwen3-4b-instruct-number-search
+tinker_base_url: http://127.0.0.1:10635
+stats:
+  experiment_name: number-search-qwen3-4b-instruct-mi350-new-image2-resume-test
+  trial_name: number-search-qwen3-4b-instruct-mi350-new-image2-resume-test
+  wandb:
+    mode: online
+    project: number-search-miles-tinker
+    entity: 9998_team
+    tags: [number-search, miles-tinker, qwen3-4b-instruct, mi350, full-finetune]

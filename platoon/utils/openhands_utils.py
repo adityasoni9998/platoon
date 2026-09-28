@@ -30,7 +30,7 @@ def _conversation_execution_status(conversation_state) -> ConversationExecutionS
 
 def _is_terminal_status(conversation_state) -> bool:
     """Return True if the conversation execution status is a terminal state."""
-    return _conversation_execution_status(conversation_state) in (
+    return getattr(conversation_state, "run_complete", False) or _conversation_execution_status(conversation_state) in (
         ConversationExecutionStatus.FINISHED,
         ConversationExecutionStatus.STUCK,
         ConversationExecutionStatus.ERROR,
@@ -261,6 +261,14 @@ def get_obs_for_last_action(
 
 def is_finished(observation: OpenHandsObservation, last_event_seen: EventID | None = None) -> bool:
     conversation_state = observation.conversation_state
+    if getattr(conversation_state, "run_complete", False):
+        # A fixed history is exhausted once its last action batch is consumed.
+        # Trailing errors/state updates need not have an associated action.
+        start = _event_cursor(
+            conversation_state.events,
+            observation.last_step_action_id or observation.last_step_observation_id,
+        )
+        return not any(is_action(event) for event in conversation_state.events[start:])
     oh_conversation_finished = _is_terminal_status(conversation_state)
     last_event_id = None
     for event in reversed(conversation_state.events):

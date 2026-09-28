@@ -1,15 +1,15 @@
 # Qwen3.5-4B full fine-tuning on the MI350 Miles-Tinker gateway.
-# Use the upstream built-in non-thinking renderer; no Hyperion Python changes.
+# Preserve non-thinking prefills in history so rollout prefixes can merge.
 train:
   model_name: Qwen/Qwen3.5-4B
-  renderer_name: qwen3_5_disable_thinking
-  context_window_length: 16384
-  batch_size: 8
+  renderer_name: qwen3_5_disable_thinking_preserve_prefix
+  context_window_length: 32768
+  batch_size: 32
   num_epochs: null
-  max_training_steps: 30
+  max_training_steps: 50
   num_minibatches: 1
   num_microbatches: 1
-  max_staleness: 0
+  max_staleness: 3
   lora_rank: 0
   loss_fn: cispo
   loss_fn_config:
@@ -29,41 +29,28 @@ train:
     filter_zero_variance_groups: false
     rollout_config:
       max_steps: 10
-      output_dir: ./rollout_results
+      output_dir: /tmp/rollout_results
       verbose: false
       timeout: 300
       inference_params:
         temperature: 1.0
         top_p: 1.0
         max_completion_tokens: 512
-  num_concurrent_rollout_workflow_workers: 8
+  num_concurrent_rollout_workflow_workers: 32
 eval:
-  strategy: step
-  every: 10
-  num_concurrent_rollout_workflow_workers: 16
-  workflow_config:
-    group_size: 1
-    rollout_config:
-      max_steps: 10
-      output_dir: ./eval_results
-      verbose: false
-      timeout: 300
-      inference_params:
-        temperature: 1.0
-        top_p: 1.0
-        max_completion_tokens: 512
+  strategy: none
+  every: 0
 checkpoint:
   strategy: step
-  every: 15
+  every: 3
   load_checkpoint_path: null
-log_path: /home/adityabs/hyperion_modal/outputs/qwen35-mi350-number-search
+log_path: /tmp/qwen3.5-4b-number-search
 tinker_base_url: http://127.0.0.1:10635
 stats:
-  experiment_name: number-search-qwen35-mi350
-  trial_name: qwen35-4b-no-thinking-cp1
+  experiment_name: number-search-qwen35-mi350_1_resume2
+  trial_name: number-search-qwen35-mi350_1_resume2
   wandb:
     mode: online
-    project: number-search-platoon-tinker
+    project: number-search-miles-tinker
     entity: 9998_team
-    tags: [number-search, miles-tinker, qwen3.5-4b, mi350, full-finetune, no-thinking, dp1, cp1]
-    notes: 'Qwen3.5-4B MI350 validation. Built-in non-thinking renderer; synchronous batches; DP1/CP1; patched FLA kernel config and Megatron staging; IPython 9.6.0; no Hyperion Python changes.'
+    tags: [number-search, miles-tinker, qwen3.5-4b, mi350, full-finetune]

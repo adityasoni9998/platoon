@@ -13,10 +13,14 @@ The AReaL configuration uses a 65,000-token prompt-plus-completion context
 window, reserves 2,048 tokens for each completion (62,952 input tokens), and
 limits the agent to 40 iterations per rollout.
 
-The episode and OpenHands conversation use a 30-minute timeout. Each agent
-action/environment step still has a 10-minute timeout. The agent Sandbox
-defaults to the episode timeout plus 5 minutes for setup and cleanup
-(35 minutes total); `MODAL_SANDBOX_TIMEOUT` overrides that Sandbox lifetime.
+The OpenHands conversation uses the configured rollout timeout (30 minutes in
+the provided recipe). During reset, the child waits for the run thread to exit,
+refreshes and reconciles events once, and freezes the history. The normal
+agent/environment loop consumes that history and evaluates rewards only at the
+end. `step_timeout` still bounds each action/step, including final evaluation.
+The episode including evaluation and the agent Sandbox default to the
+conversation timeout plus 8 minutes; `MODAL_SANDBOX_TIMEOUT` overrides that
+Sandbox lifetime.
 
 The training behavior is:
 
@@ -31,11 +35,11 @@ Fractions come from the report's `tests_status` success/failure lists; empty or
 missing groups contribute zero. Empty patches and evaluation errors earn zero.
 Reward info includes the binary reward, both fractions, and `composite_reward`.
 
-OpenHands enforces the configured turn limit. This rollout disables Platoon's
-separate step budget, which counts the initial observation as a step, so it can
-consume all agent turns and evaluate the SDK's terminal state. Iteration-limit
+OpenHands enforces the configured turn limit. This rollout collects all final
+agent events without applying a separate Platoon step budget. Iteration-limit
 and context-limit errors use the same terminal evaluator as normal completion.
-Step and rollout timeouts still propagate after cleanup.
+SDK run errors and timeouts are recorded as raw errors on the evaluated trajectory.
+The overall rollout timeout still propagates after cleanup.
 
 Tool rewards follow upstream: no `AgentErrorEvent` earns 1, and a final agent
 response containing `<tool_call>` or `</tool_call>` earns 0 for JSON formatting

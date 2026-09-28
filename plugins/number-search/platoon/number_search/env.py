@@ -18,7 +18,15 @@ def guess_factory(target: int):
 
 class NumberSearchEnv(CodeActEnv):
     def __init__(self, task: Task):
-        super().__init__(task, IPythonCodeExecutor(task, actions=(finish, guess_factory(task.misc["target"]))))
+        super().__init__(
+            task,
+            IPythonCodeExecutor(
+                task,
+                actions=(finish, guess_factory(task.misc["target"])),
+                detect_while_loops=True,
+                detect_interactive_input=True,
+            ),
+        )
 
     async def evaluate(self) -> tuple[float, dict]:
         score, reward_misc = 0.0, {}

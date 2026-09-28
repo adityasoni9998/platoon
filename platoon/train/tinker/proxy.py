@@ -107,7 +107,6 @@ class TinkerLLM(CustomLLM):
         temperature: Sampling temperature.
         top_k: Top-k sampling parameter.
         top_p: Nucleus sampling parameter.
-        seed: Random seed for reproducibility.
     """
 
     def __init__(
@@ -121,7 +120,6 @@ class TinkerLLM(CustomLLM):
         temperature: float = 1.0,
         top_k: int = -1,
         top_p: float = 1.0,
-        seed: int = 42,
         context_window_length: int | None = None,
     ) -> None:
         """Initialize the TinkerLLM."""
@@ -133,7 +131,6 @@ class TinkerLLM(CustomLLM):
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
-        self.seed = seed
         self.context_window_length = context_window_length
         self._version: int = 0
 
@@ -432,7 +429,6 @@ class TinkerLLM(CustomLLM):
         )
         top_k = self._get_optional_params(kwargs, ["top_k"], int, lambda x: True, self.top_k)
         top_p = self._get_optional_params(kwargs, ["top_p"], float, lambda x: 0.0 <= x <= 1.0, self.top_p)
-        seed = self._get_optional_params(kwargs, ["seed"], int, lambda _: True, self.seed)
         stop_sequences = self._get_optional_params(
             kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
         )
@@ -443,7 +439,6 @@ class TinkerLLM(CustomLLM):
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-            seed=seed,
             stop=stop_sequences,
         )
         start_time = time.perf_counter()
@@ -480,7 +475,6 @@ class TinkerLLM(CustomLLM):
         )
         top_k = self._get_optional_params(kwargs, ["top_k"], int, lambda x: True, self.top_k)
         top_p = self._get_optional_params(kwargs, ["top_p"], float, lambda x: 0.0 <= x <= 1.0, self.top_p)
-        seed = self._get_optional_params(kwargs, ["seed"], int, lambda _: True, self.seed)
         stop_sequences = self._get_optional_params(
             kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
         )
@@ -491,7 +485,6 @@ class TinkerLLM(CustomLLM):
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-            seed=seed,
             stop=stop_sequences,
         )
         result = self.sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)

@@ -7,6 +7,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -78,4 +79,7 @@ async def main(args: list[str]):
 
 
 if __name__ == "__main__":
+    # Rollouts must not block the shared event loop waiting for terminal input.
+    with open(os.devnull) as stdin:
+        os.dup2(stdin.fileno(), 0)
     asyncio.run(main(sys.argv[1:]))
