@@ -67,9 +67,9 @@ def main(argv=None):
         parser.error('At most four overlaid runs are supported')
     grids = {'all_rewards': [component for group in GRIDS.values() for component in group]} if args.combined else GRIDS
     def overall_mean(component):
-        data = [r for r in rows if r['component'] == component]
+        data = [r for r in rows if r['component'] == component and int(r['eligible_instances']) > 0]
         count = sum(int(r['eligible_instances']) for r in data)
-        mean = sum(float(r['reward']) * int(r['eligible_instances']) for r in data) / count
+        mean = sum(float(r['reward']) * int(r['eligible_instances']) for r in data) / count if count else float('nan')
         return 1 - mean if component == 'p2p_fail_rate' else mean
 
     for grid, components in grids.items():
@@ -98,6 +98,10 @@ def main(argv=None):
                     if metric == 'nonzero_advantage_instances_pct':
                         raw = [v / 100 for v in raw]
                     smooth = running_average(raw, window, alignment)
+                    # Do not draw a value at steps with no included rollouts.
+                    empty_steps = {int(r['step']) for r in data if int(r['eligible_instances']) == 0}
+                    smooth = [float('nan') if step in empty_steps else value
+                              for step, value in zip(steps, smooth)]
                     if not args.smooth_only:
                         ax.plot(steps, raw, color=colors[run], lw=1, alpha=.3)
                     ax.plot(steps, smooth, color=colors[run], lw=2.2)

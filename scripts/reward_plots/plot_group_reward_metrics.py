@@ -54,12 +54,14 @@ def read_rollout(path, audit):
     root_id = None
     rewards = {}
     finished = False
+    has_reward_dict = False
+    infrastructure_error = False
     with path.open() as stream:
         for line in stream:
             # Avoid decoding the large action/observation records with no rewards.
             if not any(marker in line for marker in
                        ('"trajectory_created"', '"trajectory_task_set"',
-                        '"trajectory_finished"', '"localization_reward"', '"binary_reward"')):
+                        '"trajectory_finished"', '"reward_misc"', '"localization_reward"', '"binary_reward"')):
                 continue
             try:
                 event = json.loads(line)
@@ -74,10 +76,20 @@ def read_rollout(path, audit):
             if kind == 'trajectory_task_set':
                 task_id = event['task']['id']
             elif kind == 'trajectory_step_added':
-                rewards.update(event['step'].get('misc', {}).get('reward_misc', {}))
+                info = event['step'].get('misc', {}).get('reward_misc')
+                if isinstance(info, dict) and info:
+                    has_reward_dict = True
+                    rewards.update(info)
             elif kind == 'trajectory_finished':
                 finished = True
                 rewards['overall_reward'] = event.get('reward')
+                error = event.get('error_message') or ''
+                infrastructure_error = isinstance(error, str) and error.startswith(
+                    ('LLMServiceUnavailableError:', 'LLMTimeoutError:'))
+    if infrastructure_error:
+        audit['llm_infrastructure_error_rollouts'] += 1
+    if has_reward_dict:
+        audit['rollouts_with_reward_dict'] += 1
     localization = rewards.get('localization') or {}
     f1_values = [localization.get(key) for key in
                  ('file_f1_reward', 'module_f1_reward', 'entity_f1_reward')]

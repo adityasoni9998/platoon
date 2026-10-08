@@ -3,19 +3,19 @@ train:
   context_window_length: 42048
   model_name: Qwen/Qwen3-4B-Instruct-2507
   renderer_name: qwen3_instruct_exact
-  batch_size: 8
+  batch_size: 32
   num_epochs: 1
   max_training_steps: null
   num_minibatches: 1
   num_microbatches: 1
-  max_staleness: 3
+  max_staleness: 1
   lora_rank: 0
   loss_fn: cispo
   loss_fn_config:
     clip_low_threshold: 0.0
     clip_high_threshold: 5.0
   optimizer:
-    learning_rate: 3e-6
+    learning_rate: 1e-6
     beta1: 0.9
     beta2: 0.95
     eps: 1e-8
@@ -33,7 +33,7 @@ train:
         temperature: 1.0
         max_completion_tokens: 2048
     filter_zero_variance_groups: false
-  num_concurrent_rollout_workflow_workers: 8 # total concurrent rollouts = workers * group_size
+  num_concurrent_rollout_workflow_workers: 32 # total concurrent rollouts = workers * group_size
 
 # Eval configuration
 eval:

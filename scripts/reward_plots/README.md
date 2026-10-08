@@ -1,5 +1,57 @@
 # Reward plots
 
+## Resolution probability by auxiliary-reward bucket
+
+Plot `P(issue resolved | auxiliary reward in bucket)` for one or more runs:
+
+```bash
+uv run scripts/reward_plots/plot_reward_buckets.py \
+  /path/to/dense_run /path/to/sparse_run \
+  --labels "Dense ORM" "Sparse ORM" \
+  --skip-last-steps 2 --overlay --output-dir artifacts/reward_buckets
+```
+
+Input directories may be run roots, `rollouts/train`, or `train_rollout`.
+Localization (overall, file, module, function) uses width-0.2 buckets;
+JSON-format and agent-error rewards use binary buckets; file-editor/str-replace
+reward uses width-0.25 buckets. Buckets include the left endpoint and exclude
+the right endpoint, except the final bucket includes 1.
+
+Each bar is resolved trajectories divided by trajectories in that bucket.
+Labels show the probability and sample count; whiskers are 95% task-cluster
+bootstrap intervals, keeping repeated attempts on the same issue together.
+Dotted lines show the baseline resolution probability among trajectories with
+that metric available. These are descriptive associations, not estimates of
+the causal benefit of training on an auxiliary reward.
+
+Use `--overlay` to additionally create `comparison_all` and `comparison_nonempty`
+PNG/PDF grids with side-by-side bars for each run in distinct colours.
+The default produces separate all-trajectory and nonempty-patch views per run,
+in PNG and PDF. It also saves `buckets.csv`, `rollouts.csv`, and `summary.json`.
+Only completed root trajectories with a nonempty root reward dictionary and
+a recorded binary label are included. Missing/invalid auxiliary values are
+excluded per metric rather than defaulted to zero. Unknown patch status is
+excluded from the nonempty view. Repeated attempts are retained and counts
+are rollout-weighted; there is no smoothing or per-step averaging.
+
+To redraw a saved per-rollout snapshot without reading the event logs:
+
+```bash
+uv run scripts/reward_plots/plot_reward_buckets.py \
+  --rollout-csv artifacts/reward_buckets/rollouts.csv \
+  --output-dir artifacts/reward_buckets_redraw
+```
+
+The localization-audit `rollouts.csv` uses the same input column names and can
+also be read. Step-aggregated reward-grid `metrics.csv` cannot be used to
+reconstruct conditional probabilities. Optional controls include
+`--population all|nonempty|both`, inclusive `--min-step` / `--max-step`,
+`--bootstrap-samples` (default 1000; zero disables intervals), `--seed`,
+`--workers`, and `--y-max`. `--skip-last-steps` defaults to zero and removes the
+last available steps separately per run before applying the step range.
+
+## Rewards over training steps
+
 From the repository root, generate the vertical 11×3 figure:
 
 ```bash
@@ -35,3 +87,20 @@ uv run scripts/reward_plots/plot.py /path/to/group_reward_plots_centered_k16 --s
 ```
 
 This writes `all_rewards_grid_smooth_only_dynamic_ylim.png`, preserving the default figure.
+
+## Dense/sparse ORM comparison and restarts
+
+`plot_orm_comparison.py DENSE_RUN SPARSE_RUN --output-dir OUTPUT_DIR` samples
+at most eight eligible rollouts without replacement for each `(training step,
+task ID)` group. This prevents repeated rollout batches from trainer restarts
+from turning max@8 into max@16 or max@24. Selection happens after completion
+and optional missing-reward/infrastructure-error filtering. The same selected
+rollouts are used for every reward component and for mean reward, max@8, and
+nonzero advantage. Groups with fewer than eight eligible members keep them all.
+
+Sampling is reproducible for unchanged group membership, independent of file
+iteration order, using `--group-sample-seed` (default 42) and a seed derived
+separately for each run/step/task. Changing the seed selects a different sample;
+cache entries are separated by seed. `summary.json` reports eligible counts
+before sampling and `rollouts_excluded_by_group_sampling`. Existing commands
+need no new flag to apply this cap; rerun them to rebuild old pooled metrics.
