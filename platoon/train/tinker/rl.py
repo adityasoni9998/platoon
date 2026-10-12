@@ -262,6 +262,8 @@ class TrainLoopSharedState:
     stats_logger: StatsLogger
     train_tracker: StatsTracker
     watchdog: Watchdog | None = None
+    critic_client: tinker.TrainingClient | None = None
+    ppo_batch_in_progress: bool = False
 
     def _get_event_frequency(self, config: TrainEventTriggerConfig) -> int:
         """Normalize the event frequency to the number of training steps.
@@ -319,6 +321,8 @@ class PlatoonTinkerRLTrainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
+        if self.config.train.algorithm == "ppo" and self.batch_transforms:
+            raise ValueError("PPO does not support GRPO batch transforms")
         self._model_info = register_tinker_llm(
             self.config.train.model_name,
             self.config.train.renderer_name,
@@ -368,13 +372,19 @@ class PlatoonTinkerRLTrainer:
         """Initialize resources when entering the async context."""
         # Check for resume info to get wandb run ID
         # Use run_log_path which includes experiment_name/trial_name
-        resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
+        if self.config.train.algorithm == "ppo":
+            from platoon.train.tinker.ppo import load_resume_manifest
+
+            self._ppo_resume = load_resume_manifest(self.config, self.run_log_path)
+            resume_extra = self._ppo_resume or {}
+        else:
+            resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
+            resume_extra = resume_info.extra if resume_info is not None else {}
 
         # Pass base log_path to StatsLogger - it will add experiment_name/trial_name internally
         stats_logger_config = self.config.stats.to_stats_logger_config(self.config.log_path)
 
         # If resuming, use the saved wandb run ID.
-        resume_extra = resume_info.extra if resume_info is not None else {}
         wandb_run_id = resume_extra.get("wandb_run_id")
         if wandb_run_id:
             stats_logger_config.wandb.resume_run_id = wandb_run_id
@@ -606,9 +616,15 @@ class PlatoonTinkerRLTrainer:
                     task_rollout_results = filter_trainable_datums(task_rollout_results)
                     if len(task_rollout_results) == 0:
                         logger.warning(
-                            f"No trainable datums remained for microbatch {microbatch_num} "
-                            f"(minibatch {minibatch_num})"
+                            f"No trainable datums remained for microbatch {microbatch_num} (minibatch {minibatch_num})"
                         )
+                        continue
+
+                    if shared_state.critic_client is not None:
+                        from platoon.train.tinker.ppo import update_batch
+
+                        shared_state.ppo_batch_in_progress = True
+                        await update_batch(self, shared_state, task_rollout_results)
                         continue
 
                     task_rollout_results = run_batch_transforms(
@@ -623,8 +639,7 @@ class PlatoonTinkerRLTrainer:
                     )
                     if task_rollout_results is None or len(task_rollout_results) == 0:
                         logger.warning(
-                            f"All datums were filtered out for microbatch {microbatch_num} "
-                            f"(minibatch {minibatch_num})"
+                            f"All datums were filtered out for microbatch {microbatch_num} (minibatch {minibatch_num})"
                         )
                         continue
 
@@ -645,9 +660,7 @@ class PlatoonTinkerRLTrainer:
                         for datum in task_rollout_results
                     ]
 
-                    # Scale advantages by sum of mask allows us to get mean reduction for the objective instead of sum reduction.
-                    # Tinker implements objectives with sum reduction by default, so we need to do this to make sure objective and
-                    # grad_norm is not sensitive to batch size.
+                    # Tinker sums losses; scale advantages to obtain a token mean for this microbatch.
                     scale_factor = 0.0
                     for datum in task_rollout_results:
                         scale_factor += datum.loss_fn_inputs["mask"].to_torch().sum()
@@ -680,6 +693,8 @@ class PlatoonTinkerRLTrainer:
                         f"forward_backward_async submitted in {time.perf_counter() - fwd_bwd_submit_start:.1f}s"
                     )
 
+                if shared_state.critic_client is not None:
+                    continue
                 if len(forward_backward_futures) == 0:
                     logger.warning(
                         f"No forward_backward results found for minibatch {minibatch_num} "
@@ -782,12 +797,26 @@ class PlatoonTinkerRLTrainer:
             # Update sampling client with timing
             update_start = time.perf_counter()
             logger.info(f"Calling _save_checkpoint_and_get_sampling_client for batch {shared_state.train_step}")
-            sampling_client = await self._save_checkpoint_and_get_sampling_client(
-                training_client=shared_state.training_client,
-                i_batch=shared_state.train_step,
-                save_every=shared_state.save_every,
-                start_batch=start_batch,
-            )
+            if shared_state.critic_client is not None:
+                from platoon.train.tinker.ppo import checkpoint_due
+
+                if checkpoint_due(
+                    self.config.checkpoint,
+                    shared_state.train_step + 1,
+                    start_batch,
+                    shared_state.num_train_batches_per_epoch,
+                ):
+                    state = await self._save_ppo_checkpoint(shared_state, shared_state.train_step + 1)
+                    sampling_client = shared_state.training_client.create_sampling_client(state["sampler_path"])
+                else:
+                    sampling_client = await shared_state.training_client.save_weights_and_get_sampling_client_async()
+            else:
+                sampling_client = await self._save_checkpoint_and_get_sampling_client(
+                    training_client=shared_state.training_client,
+                    i_batch=shared_state.train_step,
+                    save_every=shared_state.save_every,
+                    start_batch=start_batch,
+                )
             logger.info("_save_checkpoint_and_get_sampling_client returned, updating LLM sampling client")
             shared_state.model_info.llm.update_sampling_client(sampling_client)
             shared_state.sampling_client = sampling_client
@@ -796,6 +825,7 @@ class PlatoonTinkerRLTrainer:
             shared_state.train_tracker.scalar(update_weights_time=update_elapsed)
 
             shared_state.train_step += 1
+            shared_state.ppo_batch_in_progress = False
             shared_state.sampling_client_step += 1
 
             # Heartbeat after completing a train step
@@ -810,6 +840,21 @@ class PlatoonTinkerRLTrainer:
 
             # Log stats for this step
             step_stats = shared_state.train_tracker.export(reset=True)
+            ppo_preparation_time = 0.0
+            if shared_state.critic_client is not None:
+                ppo_timings = {
+                    key: sum(step_stats.get(f"train/timing/{role}_{key}", 0.0) for role in ("critic", "policy"))
+                    for key in (
+                        "forward_backward_submit", "forward_backward_wait", "optim_step_submit", "optim_step_wait"
+                    )
+                }
+                forward_backward_submit_total = ppo_timings["forward_backward_submit"]
+                forward_backward_wait_total = ppo_timings["forward_backward_wait"]
+                optim_step_submit_total = ppo_timings["optim_step_submit"]
+                optim_step_wait_total = ppo_timings["optim_step_wait"]
+                ppo_preparation_time = step_stats.get("train/timing/critic_forward_total", 0.0) + step_stats.get(
+                    "train/timing/prepare_batch", 0.0
+                )
             step_stats["train/step"] = shared_state.train_step
             step_stats["train/epoch"] = shared_state.train_step // shared_state.num_train_batches_per_epoch
             step_stats["progress/done_frac"] = shared_state.train_step / end_batch
@@ -818,9 +863,7 @@ class PlatoonTinkerRLTrainer:
             step_stats["timing/rollout_queue_wait"] = rollout_queue_wait_total
             step_stats["timing/forward_backward_submit"] = forward_backward_submit_total
             step_stats["timing/forward_backward_wait"] = forward_backward_wait_total
-            step_stats["timing/forward_backward_total"] = (
-                forward_backward_submit_total + forward_backward_wait_total
-            )
+            step_stats["timing/forward_backward_total"] = forward_backward_submit_total + forward_backward_wait_total
             step_stats["timing/optim_step_submit"] = optim_step_submit_total
             step_stats["timing/optim_step_wait"] = optim_step_wait_total
             step_stats["timing/optim_step_total"] = optim_step_submit_total + optim_step_wait_total
@@ -832,6 +875,7 @@ class PlatoonTinkerRLTrainer:
                 + optim_step_submit_total
                 + optim_step_wait_total
                 + update_weights_total
+                + ppo_preparation_time
             )
             step_stats["timing/batch_other"] = max(0.0, batch_elapsed - measured_batch_time)
             shared_state.stats_logger.log(step=shared_state.train_step, stats=step_stats)
@@ -981,6 +1025,24 @@ class PlatoonTinkerRLTrainer:
             logger.debug("Weights saved and sampling client created")
             return sampling_client
 
+    async def _save_ppo_checkpoint(self, shared_state: TrainLoopSharedState, batch: int) -> dict:
+        from platoon.train.tinker.ppo import save_pair
+
+        state = await self._await_with_heartbeat(
+            save_pair(
+                shared_state.training_client,
+                shared_state.critic_client,
+                self.run_log_path,
+                batch=batch,
+                wandb_run_id=self._stats_logger.wandb_run_id,
+            ),
+            name="PPO checkpoint pair",
+            watchdog=shared_state.watchdog,
+            total_timeout=1800.0,
+        )
+        self._ppo_last_saved = batch
+        return state
+
     async def _create_training_client(
         self, service_client: tinker.ServiceClient, resume_info: checkpoint_utils.CheckpointRecord | None
     ) -> tinker.TrainingClient:
@@ -1068,23 +1130,46 @@ class PlatoonTinkerRLTrainer:
 
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
 
-        resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
-        start_batch = (resume_info.batch or 0) if resume_info else 0
+        critic_client = None
+        if self.config.train.algorithm == "ppo":
+            from platoon.train.tinker.critic import create_critic
+            from platoon.train.tinker.ppo import restore_pair, save_pair
 
-        training_client = await self._create_training_client(service_client, resume_info)
+            resume = self._ppo_resume
+            start_batch = resume["batch"] if resume else 0
+            training_client = await service_client.create_lora_training_client_async(
+                self.config.train.model_name, rank=0
+            )
+            critic_client = await create_critic(service_client, self.config.train.model_name)
+            if resume:
+                await restore_pair(training_client, critic_client, resume)
+            state = await save_pair(
+                training_client,
+                critic_client,
+                self.run_log_path,
+                batch=start_batch,
+                wandb_run_id=self._stats_logger.wandb_run_id,
+            )
+            self._ppo_last_saved = start_batch
+            sampling_client = training_client.create_sampling_client(state["sampler_path"])
+        else:
+            resume_info = checkpoint_utils.get_last_checkpoint(self.run_log_path)
+            start_batch = (resume_info.batch or 0) if resume_info else 0
 
-        # Initial sampling client to use
-        path_dict = await checkpoint_utils.save_checkpoint_async(
-            training_client=training_client,
-            name=f"{start_batch:06d}",
-            log_path=self.run_log_path,
-            loop_state={
-                "batch": start_batch,
-                "wandb_run_id": self._stats_logger.wandb_run_id,
-            },
-            kind="both",
-        )
-        sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
+            training_client = await self._create_training_client(service_client, resume_info)
+
+            # Initial sampling client to use
+            path_dict = await checkpoint_utils.save_checkpoint_async(
+                training_client=training_client,
+                name=f"{start_batch:06d}",
+                log_path=self.run_log_path,
+                loop_state={
+                    "batch": start_batch,
+                    "wandb_run_id": self._stats_logger.wandb_run_id,
+                },
+                kind="both",
+            )
+            sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
         sampling_client_step = start_batch
         sampling_client_updated_event = asyncio.Event()
         sampling_client_updated_event.set()
@@ -1134,8 +1219,8 @@ class PlatoonTinkerRLTrainer:
             stats_logger=self._stats_logger,
             train_tracker=self._train_tracker,
             watchdog=watchdog,
+            critic_client=critic_client,
         )
-
         end_batch = shared_state.num_train_batches
 
         interrupted = False
@@ -1158,6 +1243,12 @@ class PlatoonTinkerRLTrainer:
 
         # Save checkpoint
         current_step = shared_state.train_step
+        if critic_client is not None:
+            # An interrupted role update must never replace the last complete pair.
+            if not shared_state.ppo_batch_in_progress and self._ppo_last_saved != current_step:
+                await self._save_ppo_checkpoint(shared_state, current_step)
+            logger.info("PPO stopped at batch %s; last complete checkpoint is %s", current_step, self._ppo_last_saved)
+            return
         if interrupted:
             # Save interrupt checkpoint so we can resume
             if current_step > start_batch:

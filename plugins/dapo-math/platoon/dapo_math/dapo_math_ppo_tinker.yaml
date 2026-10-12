@@ -1,0 +1,69 @@
+# Closest supported recipe to miles deploy/clients/dapo_ppo.py; differences are in README.md.
+data:
+  max_samples: null
+train:
+  algorithm: ppo
+  model_name: Qwen/Qwen3-4B
+  renderer_name: qwen3
+  lora_rank: 0
+  batch_size: 8  # Prompts; group_size=8 gives 64 responses per batch.
+  max_training_steps: 300
+  num_minibatches: 1
+  num_microbatches: 1
+  num_concurrent_rollout_workflow_workers: 8
+  max_staleness: 1
+  loss_fn: ppo
+  loss_fn_config:
+    clip_low_threshold: 0.8
+    clip_high_threshold: 1.2
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.98
+    eps: 1.0e-8
+    weight_decay: 0.1
+    grad_clip_norm: 1.0
+  ppo:
+    gamma: 1.0
+    gae_lambda: 1.0
+    advantage_normalization: batch
+    actor_epochs: 1
+    critic_epochs: 1
+    critic_warmup_batches: 1
+    critic:
+      value_clip: 0.2
+      num_minibatches: 1
+      num_microbatches: 1
+      optimizer:
+        learning_rate: 1.0e-5
+        beta1: 0.9
+        beta2: 0.98
+        eps: 1.0e-8
+        weight_decay: 0.1
+        grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    rollout_config:
+      max_steps: 1
+      timeout: 1800
+      verbose: false
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 8192
+eval:
+  strategy: none
+  every: 0
+checkpoint:
+  strategy: step
+  every: 10
+  load_checkpoint_path: null
+tinker_base_url: null  # Use TINKER_BASE_URL for both trainer and rollout proxy.
+log_path: /data/user_data/adityabs/miles_tinker_smoke
+stats:
+  experiment_name: dapo-math-ppo
+  trial_name: tinker-ppo-platoon-client
+  wandb:
+    mode: online
+    project: miles-amd-ppo
+    entity: 9998_team

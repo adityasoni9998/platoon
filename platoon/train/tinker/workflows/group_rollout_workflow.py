@@ -211,6 +211,14 @@ class GroupRolloutWorkflow:
 
         # === Now compute advantages and filter ===
 
+        if self.config.algorithm == "ppo":
+            # Conversion broadcasts each trajectory's own reward at action positions.
+            # Keep it as a return target; the trainer supplies the learned baseline.
+            # In particular, retain single-sample and equal-reward groups.
+            for datum in all_data:
+                datum.loss_fn_inputs["returns"] = datum.loss_fn_inputs["advantages"]
+            return all_data
+
         # Compute group-centered advantages
         mean_task_reward = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
 

@@ -27,6 +27,28 @@ class WorkflowConfig:
     leave_one_out_baseline: bool = False  # Use leave-one-out baseline for advantage centering
     depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
     filter_zero_variance_groups: bool = True  # Preserve old behavior by rejecting zero-variance groups
+    algorithm: Literal["grpo", "ppo"] = "grpo"  # Set from TrainConfig for training workflows.
+
+
+@dataclass
+class CriticConfig:
+    value_clip: float = 0.2
+    num_minibatches: int = 1
+    num_microbatches: int = 1
+    optimizer: AdamParams = field(default_factory=lambda: AdamParams(learning_rate=1e-5, grad_clip_norm=1.0))
+
+
+@dataclass
+class PPOConfig:
+    """Terminal-return actor-critic training on the existing async rollout loop."""
+
+    gamma: float = 1.0
+    gae_lambda: float = 1.0
+    advantage_normalization: Literal["batch", "none"] = "batch"
+    actor_epochs: int = 1
+    critic_epochs: int = 1
+    critic_warmup_batches: int = 1
+    critic: CriticConfig = field(default_factory=CriticConfig)
 
 
 # TODO:
@@ -52,14 +74,45 @@ class TrainConfig:
     max_staleness: int | None = None  # Max staleness for off-policy rollouts
     optimizer: AdamParams = field(default_factory=AdamParams)
     loss_fn: str = "cispo"
-    loss_fn_config: dict = field(default_factory=lambda: {"clip_low_threshold": 0.0, "clip_high_threshold": 5.0})
+    loss_fn_config: dict | None = None
     lora_rank: int = 32
     workflow_config: WorkflowConfig = field(default_factory=WorkflowConfig)
     num_concurrent_rollout_workflow_workers: int | None = None
+    algorithm: Literal["grpo", "ppo"] = "grpo"
+    ppo: PPOConfig = field(default_factory=PPOConfig)
 
     def __post_init__(self):
+        if self.loss_fn_config is None:
+            self.loss_fn_config = (
+                {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2}
+                if self.algorithm == "ppo" and self.loss_fn == "ppo"
+                else {"clip_low_threshold": 0.0, "clip_high_threshold": 5.0}
+            )
         if self.num_concurrent_rollout_workflow_workers is None:
             self.num_concurrent_rollout_workflow_workers = self.batch_size
+        if self.algorithm not in ("grpo", "ppo"):
+            raise ValueError("train.algorithm must be grpo or ppo")
+        self.workflow_config.algorithm = self.algorithm
+        if self.algorithm == "ppo":
+            self._validate_ppo()
+
+    def _validate_ppo(self):
+        if self.lora_rank != 0 or self.loss_fn not in ("ppo", "cispo"):
+            raise ValueError("Actor-critic training requires lora_rank=0 and loss_fn=ppo or cispo")
+        if self.ppo.gamma != 1.0 or self.ppo.gae_lambda != 1.0:
+            raise ValueError("Terminal-return PPO currently requires gamma=gae_lambda=1")
+        if not (
+            self.num_minibatches
+            == self.num_microbatches
+            == self.ppo.critic.num_minibatches
+            == self.ppo.critic.num_microbatches
+            == 1
+        ):
+            raise ValueError("Initial PPO requires num_minibatches=num_microbatches=1 for both actor and critic")
+        if self.ppo.advantage_normalization not in ("batch", "none"):
+            raise ValueError("ppo.advantage_normalization must be batch or none")
+        if self.workflow_config.leave_one_out_baseline or self.workflow_config.depth_level_weighting:
+            raise ValueError("PPO does not support GRPO leave-one-out baselines or depth weighting")
 
 
 @dataclass
@@ -70,7 +123,7 @@ class TrainEventTriggerConfig:
 
 @dataclass
 class CheckpointConfig(TrainEventTriggerConfig):
-    load_checkpoint_path: str | None = None
+    load_checkpoint_path: str | None = None  # For PPO: path to the paired ppo_checkpoints.jsonl history.
 
 
 @dataclass
@@ -120,6 +173,4 @@ class PlatoonTinkerRLTrainerConfig:
     def __post_init__(self):
         self.environments = normalize_environment_configs(self.environments)
         if len(self.environments) > 1:
-            raise NotImplementedError(
-                "Multiple environments are not yet supported; provide exactly one entry"
-            )
+            raise NotImplementedError("Multiple environments are not yet supported; provide exactly one entry")
