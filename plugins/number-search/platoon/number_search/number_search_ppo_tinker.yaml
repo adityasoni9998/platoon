@@ -1,0 +1,73 @@
+# Async PPO for number search on a Miles-Tinker server with --tinker-enable-critic.
+train:
+  algorithm: ppo
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 32768
+  lora_rank: 0
+  batch_size: 32
+  num_epochs: 5
+  num_minibatches: 1
+  num_microbatches: 1
+  num_concurrent_rollout_workflow_workers: 32
+  max_staleness: 1
+  loss_fn: ppo
+  loss_fn_config:
+    clip_low_threshold: 0.8
+    clip_high_threshold: 1.2
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.98
+    eps: 1.0e-8
+    weight_decay: 0.1
+    grad_clip_norm: 1.0
+  ppo:
+    gamma: 1.0
+    gae_lambda: 1.0
+    advantage_normalization: batch
+    actor_epochs: 1
+    critic_epochs: 1
+    critic_warmup_batches: 1
+    critic:
+      value_clip: 0.2
+      num_minibatches: 1
+      num_microbatches: 1
+      optimizer:
+        learning_rate: 1e-5
+        beta1: 0.9
+        beta2: 0.98
+        eps: 1.0e-8
+        weight_decay: 0.1
+        grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 10
+      output_dir: /tmp/rollout_results
+      verbose: false
+      timeout: 300
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 512
+eval:
+  strategy: none
+  every: 0
+checkpoint:
+  strategy: none
+  every: 0
+  load_checkpoint_path: null
+log_path: /data/user_data/adityabs/miles_tinker_smoke
+tinker_base_url: null  # Set TINKER_BASE_URL and TINKER_API_KEY in the environment.
+stats:
+  experiment_name: number-search-ppo
+  trial_name: tinker-ppo-number-search
+  wandb:
+    mode: online
+    project: number-search-miles-tinker
+    entity: 9998_team
+    tags: [number-search, miles-tinker, qwen3-4b-instruct, ppo, full-finetune]

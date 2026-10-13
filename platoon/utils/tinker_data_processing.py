@@ -7,8 +7,8 @@ Sequence accumulation implementation is inspired by tinker_cookbook.rl.data_proc
 https://raw.githubusercontent.com/thinking-machines-lab/tinker-cookbook/refs/heads/main/tinker_cookbook/rl/data_processing.py
 """
 
-import logging
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -290,6 +290,7 @@ def trajectory_to_data(
     traj_depth: int | None = None,
     prefix_mismatch_tokenizer=None,
     prefix_mismatch_debug_dir: str | None = None,
+    ppo_reward_mode: str | None = None,
 ) -> TrajectoryDataResult:
     """Convert a trajectory to training data, merging sequences when possible.
 
@@ -304,7 +305,11 @@ def trajectory_to_data(
         trajectory_advantage: The advantage for this trajectory (reward - mean_reward).
         checkpoint_version: The checkpoint version for staleness checking.
         filter_errors: Whether to filter out error steps.
-        trajectory_reward: The reward for the trajectory (used for error filtering).
+        trajectory_reward: Processed outcome reward (also used for error filtering).
+        ppo_reward_mode: None preserves GRPO conversion. "terminal" assigns the
+            processed outcome reward to the final turn; "turn" reads each
+            completion-bearing step's reward as an increment, not a cumulative
+            score. PPO retains filtered turns for GAE but masks their loss later.
 
     Returns:
         TrajectoryDataResult with datums and statistics.
@@ -316,6 +321,33 @@ def trajectory_to_data(
     total_output_tokens = 0
     previous_completion_id: str | None = None
     previous_action_tokens: list[int] | None = None
+    # Numeric metadata stays in the client, like checkpoint_version. Allocate a
+    # key per conversion so repeated samples of the same task cannot be joined.
+    ppo_id = (
+        TensorData(data=[uuid.uuid4().int & ((1 << 63) - 1)], dtype="int64", shape=[1]) if ppo_reward_mode else None
+    )
+    turn_rewards: list[float] = []
+    train_turns: list[bool] = []
+    turn_start = 0
+    turn_count = 0
+
+    def flush():
+        nonlocal turn_start
+        datum = make_datum_from_accumulator(
+            accumulator, checkpoint_version, traj_depth=traj_depth, traj_start=len(data) == 0
+        )
+        if ppo_id is not None:
+            datum.loss_fn_inputs.update(
+                _ppo_trajectory_id=ppo_id,
+                _ppo_turn_range=TensorData.from_torch(torch.tensor([turn_start, turn_count - 1])),
+                _ppo_rewards=TensorData.from_torch(torch.tensor(turn_rewards, dtype=torch.float32)),
+                _ppo_train_turns=TensorData.from_torch(torch.tensor(train_turns, dtype=torch.int64)),
+            )
+        data.append(datum)
+        accumulator.clear()
+        turn_rewards.clear()
+        train_turns.clear()
+        turn_start = turn_count
 
     for i, step in enumerate(trajectory["steps"]):
         # Check if we should skip this step
@@ -323,15 +355,18 @@ def trajectory_to_data(
             continue
 
         # Filter error steps from successful trajectories
+        has_error = False
         if filter_errors and trajectory_reward >= 1:
             has_error = ("error" in step and step["error"]) or (
                 "output" in step and step["output"] and "traceback" in step["output"].lower()
             )
-            if has_error:
+            if has_error and ppo_reward_mode is None:
                 continue
 
         completion_id = step["misc"]["action_misc"]["completion_id"]
         if completion_id not in interactions:
+            if ppo_reward_mode is not None:
+                raise ValueError(f"Missing interaction {completion_id}: cannot construct the PPO transition sequence")
             logger.warning(f"Completion ID {completion_id} not found in interactions for task {task_id}")
             continue
 
@@ -343,6 +378,8 @@ def trajectory_to_data(
         ob_flat = _flatten_chunks(list(ob.chunks))
         ac_tokens = list(interaction.action.tokens)
         ac_logprobs = list(interaction.action.logprobs)
+        if ppo_reward_mode is not None and not ac_tokens:
+            raise ValueError("PPO turns must contain sampled action tokens")
 
         # Track token counts per step (before merging)
         step_input_tokens = _flat_ob_token_len(ob_flat)
@@ -370,15 +407,7 @@ def trajectory_to_data(
                 previous_action_tokens=previous_action_tokens,
             )
             # New sequence doesn't extend current - flush and start new
-            data.append(
-                make_datum_from_accumulator(
-                    accumulator,
-                    checkpoint_version,
-                    traj_depth=traj_depth,
-                    traj_start=len(data) == 0,
-                )
-            )
-            accumulator.clear()
+            flush()
             delta_ob_flat = ob_flat
 
         # Add observation tokens (with 0.0 logprobs and 0.0 mask - don't train on prompts)
@@ -395,17 +424,21 @@ def trajectory_to_data(
         accumulator.mask.extend([1.0] * len(ac_tokens))
         previous_completion_id = completion_id
         previous_action_tokens = ac_tokens
+        if ppo_reward_mode is not None:
+            # Turn rewards are increments, not cumulative scores. Terminal mode
+            # uses only reward_processor's trajectory reward, assigned below.
+            turn_rewards.append(float(step["reward"]) if ppo_reward_mode == "turn" else 0.0)
+            train_turns.append(not has_error)
+            turn_count += 1
 
     # Flush remaining accumulated data
     if accumulator.full_sequence:
-        data.append(
-            make_datum_from_accumulator(
-                accumulator,
-                checkpoint_version,
-                traj_depth=traj_depth,
-                traj_start=len(data) == 0,
-            )
-        )
+        flush()
+
+    if data and ppo_reward_mode == "terminal":
+        rewards = data[-1].loss_fn_inputs["_ppo_rewards"].to_torch().clone()
+        rewards[-1] = trajectory_reward
+        data[-1].loss_fn_inputs["_ppo_rewards"] = TensorData.from_torch(rewards)
 
     # print(
     #     f"Found {count_found} steps, produced {len(data)} datums for task {task_id} trajectory {trajectory_id}"
@@ -430,6 +463,7 @@ def get_train_data_for_trajectory_collection(
     include_traj_start: bool = False,
     prefix_mismatch_tokenizer=None,
     prefix_mismatch_debug_dir: str | None = None,
+    ppo_reward_mode: str | None = None,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -476,6 +510,7 @@ def get_train_data_for_trajectory_collection(
             traj_depth=depth_map.get(trajectory_id) if include_traj_depth else None,
             prefix_mismatch_tokenizer=prefix_mismatch_tokenizer,
             prefix_mismatch_debug_dir=prefix_mismatch_debug_dir,
+            ppo_reward_mode=ppo_reward_mode,
         )
 
         if not include_traj_start:

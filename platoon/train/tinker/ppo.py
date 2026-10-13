@@ -1,9 +1,4 @@
-"""Terminal-return PPO math and paired state, using ordinary Tinker clients.
-
-Gamma and lambda are one, and the final bootstrap is zero. Consequently
-returns are the trajectory reward at every action token, including across
-prefix splits. Actor advantages are whitened after freezing critic targets.
-"""
+"""Token/turn GAE and paired checkpoints, using ordinary Tinker clients."""
 
 from __future__ import annotations
 
@@ -21,37 +16,139 @@ from tinker import TensorData
 MANIFEST_NAME = "ppo_checkpoints.jsonl"
 
 
-def prepare_batch(datums: list[tinker.Datum], outputs, normalization: str) -> tuple[list[tinker.Datum], dict]:
-    """Freeze token returns/old values, and whiten only the actor advantages.
+def compute_gae(values: torch.Tensor, rewards: torch.Tensor, gamma: float, gae_lambda: float):
+    """GAE over logical decisions, with zero bootstrap at the rollout endpoint.
 
-    Assumes gamma = lambda = 1, terminal outcome rewards, and zero terminal
-    bootstrap. The workflow supplies that outcome reward as each action token's
-    return, so GAE reduces to advantages = returns - old_values.
+    Use the equivalent lambda-return recurrence so lambda=1 produces discounted
+    reward-to-go directly, without cancellation of intermediate critic values.
+    Observation tokens and prefix-split boundaries are not decisions.
     """
-    prepared = []
-    for datum, output in zip(datums, outputs, strict=True):
+    returns = torch.empty_like(values)
+    next_return = next_value = 0.0
+    for index in reversed(range(values.numel())):
+        returns[index] = rewards[index] + gamma * ((1 - gae_lambda) * next_value + gae_lambda * next_return)
+        next_return, next_value = returns[index], values[index]
+    return returns - values, returns
+
+
+def _action_blocks(mask: torch.Tensor) -> list[tuple[int, int]]:
+    # Target-aligned mask: the value at a block's start is computed from the
+    # final prompt token, before generating the first action token.
+    padded = torch.cat((mask.new_zeros(1), mask, mask.new_zeros(1))).int()
+    edges = padded.diff()
+    return list(zip((edges == 1).nonzero().flatten().tolist(), (edges == -1).nonzero().flatten().tolist()))
+
+
+def prepare_batch(
+    datums: list[tinker.Datum],
+    outputs,
+    normalization: str,
+    *,
+    gamma: float = 1.0,
+    gae_lambda: float = 1.0,
+    value_granularity: str = "token",
+    advantage_normalization_granularity: str | None = None,
+) -> tuple[list[tinker.Datum], dict]:
+    """Compute rollout-wide GAE, then freeze critic targets and whiten actor advantages.
+
+    Datums may arrive in any order. Each carries a trajectory key, an inclusive
+    turn range, and rewards aligned with contiguous action-mask blocks. Prefix
+    breaks never reset GAE. Rollout endpoints retain the existing zero-bootstrap
+    convention (including time/context limits); nonterminal bootstrapping would
+    additionally require a recorded final observation and its critic value.
+
+    Critic loss and value statistics count each trained value position once.
+    Whitening and advantage statistics default to that same granularity, but
+    turn critics can use token-level whitening. Actor loss remains a token mean.
+    """
+    if advantage_normalization_granularity is None:
+        advantage_normalization_granularity = value_granularity
+    if advantage_normalization_granularity not in ("token", "turn"):
+        raise ValueError("advantage_normalization_granularity must be token or turn")
+    if value_granularity == "token" and advantage_normalization_granularity == "turn":
+        raise ValueError("Turn-level advantage normalization requires value_granularity=turn")
+    advantage_mask_key = "mask" if advantage_normalization_granularity == "token" else "critic_mask"
+    groups = {}
+    values, masks, blocks = [], [], []
+    for index, (datum, output) in enumerate(zip(datums, outputs, strict=True)):
         inputs = datum.loss_fn_inputs
-        if "returns" not in inputs:
-            raise ValueError("PPO workflow must provide terminal returns, not group-centered advantages")
         mask = inputs["mask"].to_torch().bool()
-        values = output["values"].to_torch().float()
-        returns = inputs["returns"].to_torch().float()
+        value = output["values"].to_torch().float()
         logprobs = inputs["logprobs"].to_torch()
-        if not (values.shape == returns.shape == mask.shape == logprobs.shape):
-            raise ValueError("PPO values, returns, logprobs, and action masks must align with target tokens")
+
+        if not (value.shape == mask.shape == logprobs.shape):
+            raise ValueError("PPO values, logprobs, and action masks must align with target tokens")
+        values.append(value)
+        masks.append(mask)
+        blocks.append(_action_blocks(mask))
         if not mask.any():
             continue
-        values = torch.where(mask, values, 0.0)
-        returns = torch.where(mask, returns, 0.0)
-        advantages = torch.where(mask, returns - values, 0.0)
+        key = inputs["_ppo_trajectory_id"].data[0]
+        first, last = inputs["_ppo_turn_range"].to_torch().tolist()
+        if not (
+            len(blocks[index])
+            == last - first + 1
+            == len(inputs["_ppo_rewards"].data)
+            == len(inputs["_ppo_train_turns"].data)
+        ):
+            raise ValueError("PPO turn range/rewards must match the action-mask blocks")
+        groups.setdefault(key, []).append((first, last, index))
+
+    advantages = [torch.zeros_like(value) for value in values]
+    returns = [torch.zeros_like(value) for value in values]
+    actor_masks = [torch.zeros_like(mask) for mask in masks]
+    critic_masks = [torch.zeros_like(mask) for mask in masks]
+    for segments in groups.values():
+        turns = []
+        expected_turn = 0
+        for first, last, index in sorted(segments):
+            if first != expected_turn:
+                raise ValueError("PPO trajectory has missing or overlapping turns")
+            expected_turn = last + 1
+            inputs = datums[index].loss_fn_inputs
+            rewards = inputs["_ppo_rewards"].to_torch().tolist()
+            train_turns = inputs["_ppo_train_turns"].to_torch().tolist()
+            turns.extend(
+                (index, start, end, reward, train)
+                for (start, end), reward, train in zip(blocks[index], rewards, train_turns, strict=True)
+            )
+
+        decision_values = torch.cat(
+            [
+                values[index][start:end] if value_granularity == "token" else values[index][start : start + 1]
+                for index, start, end, _, _ in turns
+            ]
+        )
+        decision_rewards = torch.zeros_like(decision_values)
+        offset = 0
+        for _, start, end, reward, _ in turns:
+            offset += end - start if value_granularity == "token" else 1
+            decision_rewards[offset - 1] = reward  # A turn's reward occurs after its last action token.
+        adv, targets = compute_gae(decision_values, decision_rewards, gamma, gae_lambda)
+
+        offset = 0
+        for index, start, end, _, train in turns:
+            size = end - start if value_granularity == "token" else 1
+            advantages[index][start:end] = adv[offset : offset + size]
+            returns[index][start : start + size] = targets[offset : offset + size]
+            actor_masks[index][start:end] = bool(train)
+            critic_masks[index][start : start + size] = bool(train)
+            offset += size
+
+    prepared = []
+    for index, datum in enumerate(datums):
+        if not actor_masks[index].any():
+            continue
         prepared.append(
             tinker.Datum(
                 model_input=datum.model_input,
                 loss_fn_inputs={
-                    **inputs,
-                    "returns": TensorData.from_torch(returns.clone()),
-                    "old_values": TensorData.from_torch(values.clone()),
-                    "advantages": TensorData.from_torch(advantages),
+                    **datum.loss_fn_inputs,
+                    "mask": TensorData.from_torch(actor_masks[index].float()),
+                    "critic_mask": TensorData.from_torch(critic_masks[index].float()),
+                    "returns": TensorData.from_torch(torch.where(critic_masks[index], returns[index], 0.0)),
+                    "old_values": TensorData.from_torch(torch.where(critic_masks[index], values[index], 0.0)),
+                    "advantages": TensorData.from_torch(torch.where(actor_masks[index], advantages[index], 0.0)),
                 },
             )
         )
@@ -59,8 +156,9 @@ def prepare_batch(datums: list[tinker.Datum], outputs, normalization: str) -> tu
         return [], {}
     metrics = {}
     for field in ("old_values", "returns", "advantages"):
+        mask_key = advantage_mask_key if field == "advantages" else "critic_mask"
         flat = torch.cat(
-            [d.loss_fn_inputs[field].to_torch()[d.loss_fn_inputs["mask"].to_torch().bool()] for d in prepared]
+            [d.loss_fn_inputs[field].to_torch()[d.loss_fn_inputs[mask_key].to_torch().bool()] for d in prepared]
         )
         label = "raw_advantages" if field == "advantages" else field
         metrics[f"critic/{label}_mean"] = flat.mean().item()
@@ -78,7 +176,10 @@ def prepare_batch(datums: list[tinker.Datum], outputs, normalization: str) -> tu
                 torch.where(mask, (adv - adv_mean) / torch.sqrt(adv_std.square() + 1e-8), 0.0)
             )
     normalized = torch.cat(
-        [d.loss_fn_inputs["advantages"].to_torch()[d.loss_fn_inputs["mask"].to_torch().bool()] for d in prepared]
+        [
+            d.loss_fn_inputs["advantages"].to_torch()[d.loss_fn_inputs[advantage_mask_key].to_torch().bool()]
+            for d in prepared
+        ]
     )
     metrics["critic/normalized_advantages_mean"] = normalized.mean().item()
     metrics["critic/normalized_advantages_std"] = normalized.std(unbiased=False).item()
@@ -88,13 +189,14 @@ def prepare_batch(datums: list[tinker.Datum], outputs, normalization: str) -> tu
 
 
 def loss_datums(datums: list[tinker.Datum], role: str) -> list[tinker.Datum]:
-    """GRPO's active-token normalization, with exactly one microbatch per update."""
-    count = sum(d.loss_fn_inputs["mask"].to_torch().sum().item() for d in datums)
+    """Mean critic loss over value positions; mean actor loss over action tokens."""
+    mask_key = "critic_mask" if role == "critic" else "mask"
+    count = sum(d.loss_fn_inputs[mask_key].to_torch().sum().item() for d in datums)
     scale = 1.0 / (count + 1e-8)
     output = []
     for datum in datums:
         inputs = datum.loss_fn_inputs
-        mask = inputs["mask"].to_torch().float()
+        mask = inputs[mask_key].to_torch().float()
         fields = {"target_tokens": inputs["target_tokens"]}
         if role == "critic":
             fields.update(
@@ -144,7 +246,15 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
         }
     )
     start = time.perf_counter()
-    prepared, stats = prepare_batch(datums, outputs, config.ppo.advantage_normalization)
+    prepared, stats = prepare_batch(
+        datums,
+        outputs,
+        config.ppo.advantage_normalization,
+        gamma=config.ppo.gamma,
+        gae_lambda=config.ppo.gae_lambda,
+        value_granularity=config.ppo.value_granularity,
+        advantage_normalization_granularity=config.ppo.advantage_normalization_granularity,
+    )
     tracker.scalar(**{"timing/prepare_batch": time.perf_counter() - start})
     if not prepared:
         return
@@ -183,7 +293,7 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
             if role == "critic":
                 deltas = [
                     (output["values"].to_torch() - datum.loss_fn_inputs["old_values"].to_torch())[
-                        datum.loss_fn_inputs["mask"].to_torch().bool()
+                        datum.loss_fn_inputs["critic_mask"].to_torch().bool()
                     ]
                     for datum, output in zip(prepared, result.loss_fn_outputs, strict=True)
                 ]

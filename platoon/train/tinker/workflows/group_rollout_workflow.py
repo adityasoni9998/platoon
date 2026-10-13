@@ -212,11 +212,8 @@ class GroupRolloutWorkflow:
         # === Now compute advantages and filter ===
 
         if self.config.algorithm == "ppo":
-            # Conversion broadcasts each trajectory's own reward at action positions.
-            # Keep it as a return target; the trainer supplies the learned baseline.
-            # In particular, retain single-sample and equal-reward groups.
-            for datum in all_data:
-                datum.loss_fn_inputs["returns"] = datum.loss_fn_inputs["advantages"]
+            # Keep all reward groups. The trainer computes GAE from per-turn
+            # rewards and critic predictions, across any prefix splits.
             return all_data
 
         # Compute group-centered advantages
@@ -308,6 +305,7 @@ class GroupRolloutWorkflow:
                     include_traj_start=self.config.depth_level_weighting,
                     prefix_mismatch_tokenizer=self.model_info.llm.tokenizer,
                     prefix_mismatch_debug_dir=os.environ.get("TINKER_PREFIX_MISMATCH_DEBUG_DIR"),
+                    ppo_reward_mode=self.config.ppo_reward_mode if self.config.algorithm == "ppo" else None,
                 )
 
                 if not result.datums:

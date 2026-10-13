@@ -28,6 +28,7 @@ class WorkflowConfig:
     depth_level_weighting: bool = False  # Weight trajectories inversely by depth-level frequency
     filter_zero_variance_groups: bool = True  # Preserve old behavior by rejecting zero-variance groups
     algorithm: Literal["grpo", "ppo"] = "grpo"  # Set from TrainConfig for training workflows.
+    ppo_reward_mode: Literal["terminal", "turn"] = "terminal"  # Set from TrainConfig.ppo.
 
 
 @dataclass
@@ -40,11 +41,14 @@ class CriticConfig:
 
 @dataclass
 class PPOConfig:
-    """Terminal-return actor-critic training on the existing async rollout loop."""
+    """Actor-critic training; gamma/lambda count generated tokens or agent turns."""
 
+    value_granularity: Literal["token", "turn"] = "token"
+    reward_mode: Literal["terminal", "turn"] = "terminal"  # Outcome reward, or increments from step["reward"].
     gamma: float = 1.0
     gae_lambda: float = 1.0
     advantage_normalization: Literal["batch", "none"] = "batch"
+    advantage_normalization_granularity: Literal["token", "turn"] | None = None  # None follows value_granularity.
     actor_epochs: int = 1
     critic_epochs: int = 1
     critic_warmup_batches: int = 1
@@ -93,14 +97,17 @@ class TrainConfig:
         if self.algorithm not in ("grpo", "ppo"):
             raise ValueError("train.algorithm must be grpo or ppo")
         self.workflow_config.algorithm = self.algorithm
+        self.workflow_config.ppo_reward_mode = self.ppo.reward_mode
         if self.algorithm == "ppo":
             self._validate_ppo()
 
     def _validate_ppo(self):
         if self.lora_rank != 0 or self.loss_fn not in ("ppo", "cispo"):
             raise ValueError("Actor-critic training requires lora_rank=0 and loss_fn=ppo or cispo")
-        if self.ppo.gamma != 1.0 or self.ppo.gae_lambda != 1.0:
-            raise ValueError("Terminal-return PPO currently requires gamma=gae_lambda=1")
+        if not (0 <= self.ppo.gamma <= 1 and 0 <= self.ppo.gae_lambda <= 1):
+            raise ValueError("ppo.gamma and ppo.gae_lambda must be between 0 and 1")
+        if self.ppo.value_granularity not in ("token", "turn") or self.ppo.reward_mode not in ("terminal", "turn"):
+            raise ValueError("PPO requires value_granularity=token or turn and reward_mode=terminal or turn")
         if not (
             self.num_minibatches
             == self.num_microbatches
@@ -111,6 +118,10 @@ class TrainConfig:
             raise ValueError("Initial PPO requires num_minibatches=num_microbatches=1 for both actor and critic")
         if self.ppo.advantage_normalization not in ("batch", "none"):
             raise ValueError("ppo.advantage_normalization must be batch or none")
+        if self.ppo.advantage_normalization_granularity not in (None, "token", "turn"):
+            raise ValueError("ppo.advantage_normalization_granularity must be token, turn, or None")
+        if self.ppo.value_granularity == "token" and self.ppo.advantage_normalization_granularity == "turn":
+            raise ValueError("Turn-level advantage normalization requires value_granularity=turn")
         if self.workflow_config.leave_one_out_baseline or self.workflow_config.depth_level_weighting:
             raise ValueError("PPO does not support GRPO leave-one-out baselines or depth weighting")
 

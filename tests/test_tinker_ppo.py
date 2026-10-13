@@ -3,6 +3,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from tinker import TensorData
 from platoon.train.tinker.config_defs import (
     EvalConfig,
     PlatoonTinkerRLTrainerConfig,
+    PPOConfig,
     TrainConfig,
     WorkflowConfig,
 )
@@ -25,6 +27,7 @@ from platoon.train.tinker.ppo import (
     prepare_batch,
     restore_pair,
     save_pair,
+    update_batch,
 )
 from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
 from platoon.utils.stats_tracker import StatsTracker
@@ -33,6 +36,9 @@ from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, Tra
 
 def tensor(values):
     return TensorData.from_torch(torch.tensor(values))
+
+
+_trajectory_ids = count()
 
 
 def datum(reward=1.0):
@@ -44,6 +50,10 @@ def datum(reward=1.0):
             "logprobs": tensor([0.0, -0.2, -0.3]),
             "advantages": tensor([0.0, reward, reward]),
             "returns": tensor([0.0, reward, reward]),
+            "_ppo_trajectory_id": tensor([next(_trajectory_ids)]),
+            "_ppo_turn_range": tensor([0, 0]),
+            "_ppo_rewards": tensor([reward]),
+            "_ppo_train_turns": tensor([1]),
         },
     )
 
@@ -77,7 +87,8 @@ def test_terminal_returns_and_first_action_alignment_across_datums():
     assert original[0].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, 1.0, 1.0]
 
 
-def test_whitening_is_global_and_does_not_modify_critic_returns():
+@pytest.mark.parametrize("granularity", [None, "token"])
+def test_whitening_is_global_and_does_not_modify_critic_returns(granularity):
     prepared, _ = prepare_batch(
         [datum(1), datum(0)],
         [
@@ -85,6 +96,7 @@ def test_whitening_is_global_and_does_not_modify_critic_returns():
             {"values": tensor([9.0, 0.2, 0.7])},
         ],
         "batch",
+        advantage_normalization_granularity=granularity,
     )
     flat = torch.cat([d.loss_fn_inputs["advantages"].to_torch()[1:] for d in prepared])
     assert flat.mean().item() == pytest.approx(0.0, abs=1e-6)
@@ -148,7 +160,7 @@ async def test_ppo_retains_equal_reward_groups_and_grpo_still_filters(algorithm,
         assert result is None
     else:
         assert len(result) == group_size
-        assert all(d.loss_fn_inputs["returns"].to_torch().tolist() == [0.0, 1.0, 1.0] for d in result)
+        assert all(d.loss_fn_inputs["_ppo_rewards"].to_torch().tolist() == [1.0] for d in result)
 
 
 def test_real_prefix_conversion_keeps_observations_masked_and_terminal_targets():
@@ -172,12 +184,12 @@ def test_real_prefix_conversion_keeps_observations_masked_and_terminal_targets()
         trajectory_id="trajectory",
         trajectory_advantage=1.0,
         checkpoint_version=0,
+        trajectory_reward=1.0,
+        ppo_reward_mode="terminal",
     )
     assert len(result.datums) == 2
     assert result.datums[0].loss_fn_inputs["mask"].to_torch().tolist() == [0.0, 1.0, 1.0, 0.0, 1.0]
     assert result.datums[1].loss_fn_inputs["mask"].to_torch().tolist() == [0.0, 1.0, 1.0]
-    for row in result.datums:
-        row.loss_fn_inputs["returns"] = row.loss_fn_inputs["advantages"]
     prepared, _ = prepare_batch(
         result.datums,
         [
@@ -370,6 +382,26 @@ def clients():
 
 
 @pytest.mark.asyncio
+async def test_update_batch_uses_token_whitening_with_turn_critic(tmp_path):
+    cfg = config(
+        ppo=PPOConfig(value_granularity="turn", advantage_normalization_granularity="token", critic_warmup_batches=0)
+    )
+    trainer = make_trainer(tmp_path, cfg)
+    actor, critic, _ = clients()
+    shared = SimpleNamespace(
+        training_client=actor, critic_client=critic, train_tracker=StatsTracker("test"), train_step=0, watchdog=None
+    )
+    rows = [datum(1), datum(0)]
+    rows[1].loss_fn_inputs["mask"] = tensor([0.0, 0.0, 1.0])
+    await update_batch(trainer, shared, rows)
+    # Two tokens share the positive turn advantage, and one has the negative advantage.
+    expected = torch.tensor([0, 1, 1, 0, 0, -2], dtype=torch.float32) / (3 * 2**0.5)
+    actual = torch.cat([d.loss_fn_inputs["advantages"].to_torch() for d in actor.frozen[0]])
+    torch.testing.assert_close(actual, expected)
+    assert [sum(d.loss_fn_inputs["weights"].data) for d in critic.frozen[0]] == [0.5, 0.5]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failed_method", ["save_state_async", "save_weights_for_sampler_async"])
 async def test_pair_failure_keeps_manifest_and_restores_adam_for_next_update(tmp_path, failed_method):
     actor, critic, bus = clients()
@@ -496,7 +528,8 @@ async def test_checkpoint_sampler_paths_and_between_checkpoint_publication(tmp_p
             "critic": f"tinker://critic/weights/{name}",
         }
     assert [event[1] for event in bus["events"] if event[0] == "create_sampler"] == [
-        records[0]["sampler_path"], records[1]["sampler_path"]
+        records[0]["sampler_path"],
+        records[1]["sampler_path"],
     ]
     assert sum(event[0] == "publish" for event in bus["events"]) == 2
 
@@ -531,9 +564,7 @@ async def test_existing_async_loop_overlaps_rollouts_and_resumes_pair(tmp_path, 
     assert steps == ["critic"] * 4 + ["policy"] * 2
     update_events = {"backward", "step", "backward_result", "step_result"}
     assert [event[:2] for event in bus["events"] if event[0] in update_events] == [
-        (event, role)
-        for role in steps
-        for event in ("backward", "step", "backward_result", "step_result")
+        (event, role) for role in steps for event in ("backward", "step", "backward_result", "step_result")
     ]
     for key in ("values", "returns", "weights"):
         torch.testing.assert_close(
@@ -658,11 +689,11 @@ def test_actor_loss_defaults(loss_fn, low, high):
 
 
 @pytest.mark.parametrize("field,value", [("gamma", 0.99), ("gae_lambda", 0.95)])
-def test_nonunit_gae_is_rejected(field, value):
+def test_nonunit_gae_is_supported(field, value):
     from platoon.train.tinker.config_defs import PPOConfig
 
-    with pytest.raises(ValueError, match="gamma=gae_lambda=1"):
-        config(ppo=PPOConfig(**{field: value}))
+    cfg = config(ppo=PPOConfig(**{field: value}))
+    assert getattr(cfg.train.ppo, field) == value
 
 
 @pytest.mark.asyncio
@@ -701,6 +732,9 @@ async def test_existing_grpo_loop_still_uses_only_actor(tmp_path, monkeypatch):
         async def arun_episode(self, task):
             row = datum()
             row.loss_fn_inputs.pop("returns")
+            for key in list(row.loss_fn_inputs):
+                if key.startswith("_ppo_"):
+                    del row.loss_fn_inputs[key]
             return [row]
 
     try:
