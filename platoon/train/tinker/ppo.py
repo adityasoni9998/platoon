@@ -23,11 +23,15 @@ def compute_gae(values: torch.Tensor, rewards: torch.Tensor, gamma: float, gae_l
     reward-to-go directly, without cancellation of intermediate critic values.
     Observation tokens and prefix-split boundaries are not decisions.
     """
-    returns = torch.empty_like(values)
+    # Avoid dispatching scalar Torch operations for every decision. Python floats
+    # also keep the recurrence in double precision until the final tensor cast.
+    value_list, reward_list = values.tolist(), rewards.tolist()
+    return_list = [0.0] * len(value_list)
     next_return = next_value = 0.0
-    for index in reversed(range(values.numel())):
-        returns[index] = rewards[index] + gamma * ((1 - gae_lambda) * next_value + gae_lambda * next_return)
-        next_return, next_value = returns[index], values[index]
+    for index in reversed(range(len(value_list))):
+        return_list[index] = reward_list[index] + gamma * ((1 - gae_lambda) * next_value + gae_lambda * next_return)
+        next_return, next_value = return_list[index], value_list[index]
+    returns = values.new_tensor(return_list)
     return returns - values, returns
 
 

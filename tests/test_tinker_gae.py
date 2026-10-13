@@ -104,6 +104,22 @@ def test_gae_matches_monte_carlo_td_and_intermediate_lambda(gamma, lam, targets)
     torch.testing.assert_close(advantages, returns - values)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("length", [0, 1, 4096])
+def test_gae_terminal_returns_match_discount_powers_and_preserve_dtype(length, dtype):
+    values = torch.linspace(-1, 1, length, dtype=dtype)
+    rewards = torch.zeros_like(values)
+    if length:
+        rewards[-1] = 1.0
+    gamma = 0.999
+    advantages, returns = compute_gae(values, rewards, gamma, 1.0)
+    # With lambda=1 and one terminal reward, critic values drop out entirely.
+    steps_to_terminal = torch.arange(length - 1, -1, -1, dtype=torch.float64)
+    expected = (gamma**steps_to_terminal).to(dtype)
+    torch.testing.assert_close(returns, expected)
+    torch.testing.assert_close(advantages, expected - values)
+
+
 def test_terminal_reward_mode_does_not_sum_step_rewards_and_keeps_rollouts_separate():
     # Same external task/trajectory labels in separate samples must not collide.
     a = convert([[10], [20]], [[11], [21]], [1, 2], mode="terminal", trajectory_reward=9)
