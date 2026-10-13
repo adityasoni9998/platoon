@@ -432,7 +432,7 @@ class TinkerLLM(CustomLLM):
         stop_sequences = self._get_optional_params(
             kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
         )
-        model_input = self._prepare_model_input(**kwargs)
+        model_input = await asyncio.to_thread(self._prepare_model_input, **kwargs)
         self._check_context_window_length(model_input, max_tokens)
         params = SamplingParams(
             max_tokens=max_tokens,
@@ -461,7 +461,7 @@ class TinkerLLM(CustomLLM):
         elapsed = time.perf_counter() - start_time
         if elapsed > 30.0:
             logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
-        final_response = self._parse_response(model_input, result)
+        final_response = await asyncio.to_thread(self._parse_response, model_input, result)
         self._record_interaction(model_input, final_response)
         return final_response
 
