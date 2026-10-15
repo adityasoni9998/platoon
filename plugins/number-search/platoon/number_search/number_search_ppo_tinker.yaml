@@ -1,4 +1,9 @@
-# Async PPO for number search on a Miles-Tinker server with --tinker-enable-critic.
+# Async PPO with turn-level rewards, critic values, and advantage whitening.
+# The Miles-Tinker server must have --tinker-enable-critic.
+reward_shaping:
+  enabled: true
+  midpoint_reward: 0.2
+  invalid_guess_reward: -0.2
 train:
   algorithm: ppo
   model_name: Qwen/Qwen3-4B-Instruct-2507
@@ -6,7 +11,8 @@ train:
   context_window_length: 32768
   lora_rank: 0
   batch_size: 32
-  num_epochs: 5
+  num_epochs: null
+  max_training_steps: 250
   num_minibatches: 1
   num_microbatches: 1
   num_concurrent_rollout_workflow_workers: 32
@@ -23,8 +29,11 @@ train:
     weight_decay: 0.1
     grad_clip_norm: 1.0
   ppo:
-    gamma: 1.0
-    gae_lambda: 1.0
+    value_granularity: turn
+    reward_mode: turn
+    advantage_normalization_granularity: turn
+    gamma: 0.99
+    gae_lambda: 0.9
     advantage_normalization: batch
     actor_epochs: 1
     critic_epochs: 1
@@ -65,7 +74,7 @@ log_path: /data/user_data/adityabs/miles_tinker_smoke
 tinker_base_url: null  # Set TINKER_BASE_URL and TINKER_API_KEY in the environment.
 stats:
   experiment_name: number-search-ppo
-  trial_name: tinker-ppo-number-search
+  trial_name: turn-critic-shaped-g099-l09-turn-whitening
   wandb:
     mode: online
     project: number-search-miles-tinker

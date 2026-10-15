@@ -12,12 +12,17 @@ from platoon.utils.llm_client import LiteLLMClient
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from .agent import NumberSearchAgent
-from .env import NumberSearchEnv
+from .env import NumberSearchEnv, RewardShapingConfig
 
 logger = getLogger("platoon.number_search.rollout")
 
 
-async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
+async def run_rollout(
+    task: Task,
+    config: RolloutConfig,
+    *,
+    reward_shaping: RewardShapingConfig | None = None,
+) -> dict | TrajectoryCollection:
     agent = env = None
     try:
         llm_client = LiteLLMClient(
@@ -25,7 +30,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             base_url=config.model_endpoint,
             api_key=config.model_api_key,
         )
-        env = NumberSearchEnv(task)
+        env = NumberSearchEnv(task, reward_shaping=reward_shaping)
         agent = NumberSearchAgent(
             llm_client=llm_client,
             include_reasoning=False,
