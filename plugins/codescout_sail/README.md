@@ -141,6 +141,12 @@ uv run --extra areal python -m platoon.codescout_sail.train \
 
 ## Train with Tinker
 
+For PPO with one critic-only warmup step, use
+[`train_codescout_ppo_tinker.yaml`](platoon/codescout_sail/train_codescout_ppo_tinker.yaml).
+The [PPO launch instructions](tinker.md#ppo-on-swe-smith-code-search) describe
+the critic-enabled server requirement, optimizer settings, and unchanged
+CodeScout F1/turn-limit reward.
+
 Each rollout runs in a fresh subprocess, following issue-resolution legacy.
 The trainer retains the shared Tinker proxy and Modal tunnel. A blocking
 Sailbox request therefore stalls only its rollout process. The parent enforces
@@ -170,13 +176,12 @@ uv run --locked --extra tinker python -m platoon.codescout_sail.train_tinker \
   --config platoon/codescout_sail/train_codescout_fft_tinker.yaml
 ```
 
-This uses CISPO, learning rate `3e-6`, batch size 8, rollout group size 8,
-maximum staleness 3, and Qwen/Qwen3-4B-Instruct-2507. The 42,048-token total
+This uses CISPO, learning rate `1e-6`, batch size 32, rollout group size 8,
+maximum staleness 1, and Qwen/Qwen3-4B-Instruct-2507. The 42,048-token total
 context budget reserves 2,048 tokens for output (40,000 for the prompt).
-Eight workflow workers allow up to 64 simultaneous Sailbox rollouts. The
+32 workflow workers allow up to 256 simultaneous Sailbox rollouts. The
 default runs one epoch of the current CodeScout dataset loader, which loads
-`adityasoni17/SWE-smith-py-code-search`; it does **not** apply a 257-instance
-filter. Add `--train.max_training_steps 1` to bound an initial training check.
+`adityasoni17/SWE-smith-py-code-search`
 Asynchronous rollout workers may start extra rollouts ahead of that step.
 
 W&B uploads metrics to `codescout-platoon-tinker` (`mode: online`). Logs,
