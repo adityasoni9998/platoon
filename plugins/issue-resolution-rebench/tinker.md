@@ -74,3 +74,68 @@ Logs and checkpoint metadata go under
 `/data/user_data/adityabs/miles_tinker_rebench/experiments/issue-resolution-rebench-tinker/<trial_name>/`; change `--log_path`
 to choose another root. Weight and optimizer files use the Tinker service's
 checkpoint storage. Reusing a trial directory resumes its checkpoint metadata.
+
+## Profiling inference on a client or server node
+
+The same profiler works wherever the Platoon training client runs, including the
+Tinker server node. Install the plugin with `uv sync --locked --extra tinker`
+as above so the private SDK hooks use the tested Tinker version (0.16.1).
+The node still needs the usual Modal, W&B, and model/dataset access for this
+workload. Profiling does not require changes to the Tinker server.
+
+To measure a local client-to-server path, set `TINKER_BASE_URL` to the server's
+actual local HTTP endpoint and export its `TINKER_API_KEY`. Keeping the public
+Modal URL still sends SDK requests through that relay. The OpenHands agents
+continue to reach Platoon's inference router through Modal.
+
+From `plugins/issue-resolution-rebench`, launch a fresh, two-batch profiling run:
+
+```bash
+: "${TINKER_BASE_URL:?Export the Tinker endpoint to measure}"
+: "${TINKER_API_KEY:?Export your Tinker API key}"
+unset TINKER_SUBPROCESS_SAMPLING
+uv run --locked --extra tinker python -m platoon.issue_resolution.train_tinker \
+  --config platoon/issue_resolution/train_issue_resolution_ppo_tinker.yaml \
+  --tinker_base_url "$TINKER_BASE_URL" \
+  --log_path "$HOME/platoon-profile-runs" \
+  --stats.trial_name "rebench-ppo-profile-$(date +%Y%m%d-%H%M%S)" \
+  --train.max_training_steps 2 \
+  --profiling.enabled true
+```
+
+Choose a writable `--log_path` on that node; the YAML's default `/data/...` path
+belongs to the original client machine. This command runs PPO training,
+including the initial critic-only warmup batch. Adjust the batch limit as needed.
+SDK subprocess sampling is unsupported by the profiler and is rejected when
+enabled; this is separate from the OpenHands rollout subprocesses.
+
+Profiling is disabled by default. When enabled, it records prompt preparation,
+SDK scheduling and admission waits, submission acknowledgements, answer
+retrieval, HTTP transport events, response parsing, and training spans. Separate
+heartbeats measure delays on the proxy, SDK, and trainer event loops. Request
+IDs link SDK calls to proxy traces, and proxy responses include an
+`X-Platoon-Trace-ID` header.
+
+Trace files are written to
+`<log_path>/<experiment_name>/<trial_name>/profiling/trace-<timestamp>-<pid>.jsonl`.
+From the repository root, summarize a run or inspect one request:
+
+```bash
+python3 scripts/profile_inference.py /path/to/trial/profiling/trace-*.jsonl
+python3 scripts/profile_inference.py /path/to/trace.jsonl --trace-id TRACE_ID
+```
+
+The summary reports counts, mean, median, p95, and maximum durations. Spans
+overlap: `sdk.bytes_wait` is part of `sdk.dispatch_wait`, and SDK HTTP calls are
+inside submission/retrieval spans. Do not add those rows together. HTTP waiting
+includes local connection handling, network communication, and remote work;
+it does not isolate network latency or GPU generation time. The trace does not
+directly measure individual HTTP connection locks. Timings use local monotonic
+clocks; match request IDs for comparisons with server logs.
+
+JSON encoding and disk writes run in a background thread. Event producers use a
+bounded buffer and drop records instead of waiting when it is full or busy.
+The summary reports dropped events and incomplete spans; tracing still has
+some CPU overhead. Traces omit request bodies, prompts, tokens, and credentials.
+The hooks are removed on normal session exit and do not edit installed packages
+or change the SDK's admission budget or HTTP connection settings.

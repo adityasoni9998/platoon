@@ -28,6 +28,7 @@ configure_plain_logging()
 
 from datasets import Dataset
 from platoon.inference.inference_tunnel import InferenceTunnelConfig
+from platoon.train.tinker import profiling as inference_profiling
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
@@ -40,6 +41,9 @@ from platoon.issue_resolution.tinker_workflow import TinkerProxyRollout, routed_
 
 @dataclass
 class IssueResolutionTinkerConfig(PlatoonTinkerRLTrainerConfig):
+    profiling: inference_profiling.ProfilingConfig = field(
+        default_factory=inference_profiling.ProfilingConfig
+    )
     inference_tunnel: InferenceTunnelConfig = field(
         default_factory=lambda: InferenceTunnelConfig(backend="modal")
     )
@@ -53,6 +57,12 @@ def main(args: list[str]):
         config_class=IssueResolutionTinkerConfig,
         default_config_path=str(default_config),
     )
+    run_log_path = Path(config.log_path) / config.stats.experiment_name / config.stats.trial_name
+    with inference_profiling.profiling_session(config.profiling, run_log_path):
+        run_training(config)
+
+
+def run_training(config: IssueResolutionTinkerConfig):
     train_datamap, _ = load_data()
     train_dataset = Dataset.from_list([{"task_id": x} for x in train_datamap.keys()])
     # Create trainer and run with context manager for proper cleanup
@@ -69,6 +79,8 @@ def main(args: list[str]):
 
 
 async def train(trainer, rollout_fn):
+    if profiler := inference_profiling.current():
+        profiler.watch_loop("trainer")
     async with trainer:
         train_workflow = GroupRolloutWorkflow(
             rollout_fn=rollout_fn,

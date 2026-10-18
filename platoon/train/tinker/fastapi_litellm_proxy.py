@@ -19,6 +19,7 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 from litellm.exceptions import APIConnectionError, BadRequestError, ContextWindowExceededError
 
+from platoon.train.tinker import profiling
 from platoon.train.tinker.proxy import TinkerLLMInteraction, TinkerLLMProxySession
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ class FastAPILiteLLMTinkerHTTPProxyServer:
         self.litellm_model_name = litellm_model_name
         self.context_window_length = context_window_length
         self.app = FastAPI(title="Platoon Tinker LiteLLM Proxy")
+        if profiling.current() is not None:
+            self.app.add_middleware(profiling.ProxyTraceMiddleware)
         self._lock = threading.Lock()
         self._interactions_by_session: defaultdict[str, dict[str, TinkerLLMInteraction]] = defaultdict(dict)
         self._server: uvicorn.Server | None = None
@@ -116,11 +119,12 @@ class FastAPILiteLLMTinkerHTTPProxyServer:
 
         async with TinkerLLMProxySession() as proxy_session:
             try:
-                response = await litellm.acompletion(
-                    model=self.litellm_model_name,
-                    messages=messages,
-                    **completion_kwargs,
-                )
+                with profiling.span("litellm.completion"):
+                    response = await litellm.acompletion(
+                        model=self.litellm_model_name,
+                        messages=messages,
+                        **completion_kwargs,
+                    )
                 # NOTE: Disable masking loss for overlong responses by commenting below block
                 # choices = response.get("choices") or []
                 # if choices and choices[0].get("finish_reason") == "length":
@@ -137,12 +141,14 @@ class FastAPILiteLLMTinkerHTTPProxyServer:
                 raise
             interactions = dict(proxy_session.interactions)
 
-        with self._lock:
-            self._interactions_by_session[session_id].update(interactions)
+        with profiling.span("proxy.store_interactions"):
+            with self._lock:
+                self._interactions_by_session[session_id].update(interactions)
 
-        if hasattr(response, "model_dump"):
-            return response.model_dump(mode="json", exclude_none=True)
-        return dict(response)
+        with profiling.span("proxy.response_model_dump"):
+            if hasattr(response, "model_dump"):
+                return response.model_dump(mode="json", exclude_none=True)
+            return dict(response)
 
     def start(self) -> None:
         if self._server is not None:

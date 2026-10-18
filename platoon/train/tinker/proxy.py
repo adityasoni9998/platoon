@@ -37,12 +37,12 @@ from litellm.utils import custom_llm_setup
 from tinker.types import ModelInput, SampleResponse, SamplingParams
 from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.renderers import Message as TinkerMessage
-from tinker_cookbook.renderers import Renderer, get_renderer
+from tinker_cookbook.renderers import Renderer, ToolSpec, get_renderer
 from tinker_cookbook.renderers import ToolCall as TinkerToolCall
-from tinker_cookbook.renderers import ToolSpec
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from transformers import AutoProcessor, PreTrainedTokenizer
 
+from platoon.train.tinker import profiling
 from platoon.train.tinker.qwen3_exact_renderer import register_qwen3_exact_renderer
 from platoon.train.tinker.qwen35_renderer import register_qwen35_renderer
 
@@ -432,8 +432,15 @@ class TinkerLLM(CustomLLM):
         stop_sequences = self._get_optional_params(
             kwargs, ["stop"], list, lambda x: True, self.renderer.get_stop_sequences()
         )
-        model_input = await asyncio.to_thread(self._prepare_model_input, **kwargs)
+        model_input = await profiling.to_thread("prompt", self._prepare_model_input, **kwargs)
         self._check_context_window_length(model_input, max_tokens)
+        if profiler := profiling.current():
+            profiler.emit(
+                "sampling_parameters",
+                prompt_tokens=model_input.length,
+                max_output_tokens=max_tokens,
+                policy_version=self.version,
+            )
         params = SamplingParams(
             max_tokens=max_tokens,
             temperature=temperature,
@@ -461,8 +468,13 @@ class TinkerLLM(CustomLLM):
         elapsed = time.perf_counter() - start_time
         if elapsed > 30.0:
             logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
-        final_response = await asyncio.to_thread(self._parse_response, model_input, result)
-        self._record_interaction(model_input, final_response)
+        final_response = await profiling.to_thread("response_parse", self._parse_response, model_input, result)
+        with profiling.span("interaction_record"):
+            self._record_interaction(model_input, final_response)
+        if profiler := profiling.current():
+            profiler.emit(
+                "sampling_complete", output_tokens=final_response.usage.completion_tokens, response_id=final_response.id
+            )
         return final_response
 
     def completion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
