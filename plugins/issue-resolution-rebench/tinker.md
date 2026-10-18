@@ -33,6 +33,7 @@ Launch training:
 : "${TINKER_BASE_URL:?Export your Tinker service URL}"
 unset SWEREBENCH_MAX_INSTANCES
 uv run --locked --extra tinker python -m platoon.issue_resolution.train_tinker \
+  --config platoon/issue_resolution/train_issue_resolution_fft_tinker.yaml \
   --tinker_base_url "$TINKER_BASE_URL" \
   --stats.trial_name "rebench-tinker-$(date +%Y%m%d-%H%M%S)"
 ```

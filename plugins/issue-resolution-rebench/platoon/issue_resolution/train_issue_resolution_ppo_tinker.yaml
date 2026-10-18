@@ -1,0 +1,104 @@
+# PPO using Rebench's dense-ORM CISPO rewards and rollout settings.
+# Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
+# batch_size counts tasks: 64 tasks x 8 rollouts = up to 512 trajectories/batch.
+# 64 concurrent group workers allow up to 512 concurrent rollouts.
+train:
+  algorithm: ppo
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 65000
+  batch_size: 64
+  num_epochs: 2
+  max_training_steps: null
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 1
+  lora_rank: 0
+  loss_fn: ppo
+  loss_fn_config:
+    clip_low_threshold: 0.8
+    clip_high_threshold: 1.2
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.98
+    eps: 1.0e-8
+    weight_decay: 0.1
+    grad_clip_norm: 1.0
+  ppo:
+    value_granularity: turn
+    # Preserve dense outcome reward, assigned to the final agent turn.
+    # Intermediate tool penalties and localization/test deltas are not enabled.
+    reward_mode: terminal
+    advantage_normalization_granularity: turn
+    # Undiscounted terminal return: every turn targets the final dense ORM reward.
+    gamma: 1.0
+    gae_lambda: 1.0
+    advantage_normalization: batch
+    actor_epochs: 1
+    critic_epochs: 1
+    critic_warmup_batches: 1
+    critic:
+      value_clip: 0.2
+      num_minibatches: 1
+      num_microbatches: 1
+      optimizer:
+        learning_rate: 1.0e-5
+        beta1: 0.9
+        beta2: 0.98
+        eps: 1.0e-8
+        weight_decay: 0.1
+        grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 40
+      verbose: true
+      train: true
+      timeout: 1800
+      step_timeout: 600
+      extra:
+        max_input_tokens: 62952
+        use_binary_reward: false
+        enable_length_penalty: false
+        length_penalty_threshold: 10
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+  num_concurrent_rollout_workflow_workers: 64
+
+eval:
+  strategy: none
+
+checkpoint:
+  strategy: step
+  # Counts trainer batches, including the initial critic-only warmup batch.
+  # First scheduled save: 9 actor updates and 10 critic updates.
+  every: 10
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+log_path: /data/user_data/adityabs/miles_tinker_rebench/experiments
+tinker_base_url: null
+
+stats:
+  experiment_name: issue-resolution-rebench-tinker
+  trial_name: qwen3-4b-instruct-ppo-dense-orm-b64-g8
+  wandb:
+    mode: online
+    project: issue_resolution-miles
+    entity: null
+    tags: [issue_resolution, swe_rebench, tinker, ppo, dense_orm, turn_critic]
+
+inference_tunnel:
+  backend: modal
+  modal:
+    app_name: platoon-inference-router
+    cpu: 0.125
+    memory: 128
+    timeout: 86400

@@ -1,4 +1,5 @@
-# CodeScout on Sail: rollout settings from codescout-platoon-tinker/rfchcgg4.
+# CodeScout on Sail: context and episode settings from codescout-platoon-tinker/rfchcgg4.
+# 256 tasks per batch, one rollout per task, up to 256 concurrent rollouts.
 # PPO and optimizer settings from number_search_ppo_tinker.yaml.
 # Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
 train:
@@ -7,12 +8,12 @@ train:
   renderer_name: qwen3_instruct_exact
   context_window_length: 42048
   lora_rank: 0
-  batch_size: 32
+  batch_size: 256
   num_epochs: 1
   max_training_steps: null
   num_minibatches: 1
   num_microbatches: 1
-  num_concurrent_rollout_workflow_workers: 32
+  num_concurrent_rollout_workflow_workers: 256
   max_staleness: 1
   loss_fn: ppo
   loss_fn_config:
@@ -49,7 +50,7 @@ train:
         weight_decay: 0.1
         grad_clip_norm: 1.0
   workflow_config:
-    group_size: 8
+    group_size: 1
     leave_one_out_baseline: false
     depth_level_weighting: false
     filter_zero_variance_groups: false
@@ -86,7 +87,7 @@ inference_tunnel:
 
 stats:
   experiment_name: codescout-platoon-tinker
-  trial_name: qwen3_4b_ppo_sail
+  trial_name: qwen3_4b_ppo_sail_b256_g1
   wandb:
     mode: online
     project: codescout-platoon-tinker
