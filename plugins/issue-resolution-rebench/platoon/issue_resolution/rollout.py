@@ -12,6 +12,7 @@ os.environ["MODAL_SANDBOX_V2"] = "1"
 
 from jinja2 import Environment, FileSystemLoader
 from openhands.sdk import LLM, Agent, get_logger
+from openhands.sdk.hooks import HookConfig
 from openhands.tools import get_default_tools
 from openhands.workspace import ModalWorkspace
 from platoon.config_defs import RolloutConfig
@@ -23,6 +24,7 @@ from platoon.openhands.agent import OpenHandsAgent
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from platoon.issue_resolution.env import SWERebenchEnv
+from platoon.issue_resolution.turn_snapshots import install_capture_hook
 from platoon.issue_resolution.tasks import (
     NUM_RETRIES_SANDBOX_START,
     SDK_SHORT_SHA,
@@ -65,7 +67,9 @@ def _modal_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWor
     )
 
 
-def prepare_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWorkspace:
+def prepare_workspace(
+    instance: dict, *, rollout_timeout: int = 1800, turn_rewards: bool = False,
+) -> tuple[ModalWorkspace, HookConfig | None]:
     """Start a Modal workspace and validate its prebuilt SWE-rebench testbed."""
     instance_id = str(instance["instance_id"])
     repo_path = "/testbed"
@@ -86,13 +90,14 @@ def prepare_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWo
                 raise RuntimeError(f"Testbed cleanup failed: {clean.stderr}")
 
             instance["repo_path"] = repo_path
+            hook_config = install_capture_hook(workspace, instance) if turn_rewards else None
             logger.info(
                 "Modal workspace for %s is ready at %s using SDK image %s",
                 instance_id,
                 repo_path,
                 SDK_SHORT_SHA,
             )
-            return workspace
+            return workspace, hook_config
         except Exception as error:
             last_error = error
             if workspace is not None:
@@ -195,8 +200,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         instance: dict = task.misc
         prepare_workspace_start = time.perf_counter()
         try:
-            workspace = await asyncio.to_thread(
-                prepare_workspace, instance, rollout_timeout=rollout_timeout
+            workspace, hook_config = await asyncio.to_thread(
+                prepare_workspace, instance, rollout_timeout=rollout_timeout,
+                turn_rewards=config.extra.get("turn_rewards", False),
             )
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
         except Exception as error:
@@ -221,9 +227,10 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             workspace=workspace,
             conversation_timeout=rollout_timeout,
             wait_for_completion=True,
-            enable_length_penalty=config.extra.get("enable_length_penalty", False),
+            hook_config=hook_config,
             use_binary_reward=config.extra.get("use_binary_reward", False),
-            length_penalty_threshold=config.extra.get("length_penalty_threshold", 10),
+            turn_rewards=config.extra.get("turn_rewards", False),
+            reward_artifact_dir=config.output_dir,
         )
         agent_init_s = time.perf_counter() - agent_init_start
 
@@ -251,6 +258,8 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         agent_loop_start = time.perf_counter()
         try:
             await asyncio.wait_for(episode_task, timeout=episode_timeout)
+            if env.turn_reward_error is not None:
+                raise RuntimeError(f"Turn reward evaluation failed: {env.turn_reward_error}")
             agent_loop_s = time.perf_counter() - agent_loop_start
         except asyncio.TimeoutError as error:
             agent_loop_s = time.perf_counter() - agent_loop_start

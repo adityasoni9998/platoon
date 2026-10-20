@@ -40,8 +40,6 @@ workflow_config:
     step_timeout: 600
     extra:
       max_input_tokens: 62952
-      enable_length_penalty: false
-      length_penalty_threshold: 10
     inference_params:
       temperature: 1.0
       max_completion_tokens: 2048

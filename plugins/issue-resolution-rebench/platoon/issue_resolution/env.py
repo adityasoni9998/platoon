@@ -1,15 +1,19 @@
 import asyncio
 import logging
 import shlex
+from pathlib import Path
 
 from openhands.sdk.workspace import BaseWorkspace
 from platoon.openhands.env import OpenHandsEnv
-from platoon.utils.openhands_utils import is_action, is_finished
+from platoon.utils.openhands_utils import is_finished
 from platoon.issue_resolution.test_execution_reward.test_execution_reward import compute_test_execution_reward
-from platoon.issue_resolution.localization_reward.localization_reward import compute_localization_reward
+from platoon.issue_resolution.localization_reward.localization_reward import compute_localization_reward, score_sources
 from platoon.issue_resolution.tool_error_reward.tool_json_error import compute_tool_json_error_reward
 from platoon.issue_resolution.tool_error_reward.agent_error_event import compute_agent_error_reward
 from platoon.issue_resolution.tool_error_reward.str_replace_errors import compute_str_replace_reward
+from platoon.issue_resolution.turn_snapshots import (
+    EMPTY_PATCH_HASH, capture_command, completion_snapshots, download_snapshots,
+)
 logger = logging.getLogger(__name__)
 
 def remove_binary_files_from_git():
@@ -52,24 +56,118 @@ def extract_patch_from_environment(
 
 class SWERebenchEnv(OpenHandsEnv):
     def __init__(
-        self, task, agent, workspace, *, length_penalty_threshold: int,
-        enable_length_penalty: bool = False, use_binary_reward: bool = False, **kwargs,
+        self, task, agent, workspace, *, use_binary_reward: bool = False,
+        turn_rewards: bool = False, reward_artifact_dir: str | None = None,
+        **kwargs,
     ):
-        max_turns = task.max_steps
-        if enable_length_penalty and (
-            not isinstance(length_penalty_threshold, int)
-            or isinstance(length_penalty_threshold, bool)
-            or max_turns is None
-            or not 0 <= length_penalty_threshold < max_turns
-        ):
-            raise ValueError("length_penalty_threshold must be an integer >= 0 and < task.max_steps")
         super().__init__(task=task, agent=agent, workspace=workspace, **kwargs)
         self._terminal_result = None
-        self._enable_length_penalty = enable_length_penalty
         self._use_binary_reward = use_binary_reward
-        self._length_penalty_threshold = length_penalty_threshold
+        self._turn_rewards_enabled = turn_rewards
+        self._test_execution_semaphore = asyncio.Semaphore(8)
+        self._snapshot_scores = {}
+        self._completion_snapshots = {}
+        self._previous_patch_hash = EMPTY_PATCH_HASH
+        self._best_localization = self._best_test = 0.0
+        self.turn_reward_error = None
+        self._reward_artifact_dir = Path(reward_artifact_dir) if reward_artifact_dir else None
+        if turn_rewards:
+            if not self._wait_for_completion:
+                raise ValueError("Turn rewards require wait_for_completion=True")
+            if use_binary_reward:
+                raise ValueError("Turn rewards require dense rewards")
+            if self._reward_artifact_dir is None:
+                raise ValueError("Turn rewards require a reward_artifact_dir")
+
+    async def reset(self):
+        if not self._turn_rewards_enabled:
+            return await super().reset()
+        self.turn_reward_error = None
+        self._previous_patch_hash = EMPTY_PATCH_HASH
+        self._best_localization = self._best_test = 0.0
+        try:
+            observation = await super().reset()
+            # Generation has finished. Reuse the SDK action/completion IDs;
+            # the normal step loop will handle action/observation pairing.
+            self._completion_snapshots = completion_snapshots(
+                self._state.conversation_state.events, capture_command(self._task.misc),
+            )
+            snapshots = await asyncio.to_thread(
+                download_snapshots, self._workspace, self._reward_artifact_dir,
+            )
+            snapshots.setdefault(EMPTY_PATCH_HASH, {"patch": ""})
+            results = await asyncio.gather(*(self._score_snapshot(s) for s in snapshots.values()))
+            self._snapshot_scores = dict(zip(snapshots, results, strict=True))
+            return observation
+        except Exception as error:
+            # run_episode logs ordinary exceptions and returns its partial
+            # trajectory. run_rollout must reject that result, not train on zeros.
+            self.turn_reward_error = str(error) or type(error).__name__
+            raise
+
+    async def _score_snapshot(self, snapshot):
+        if not snapshot["patch"]:
+            # Assume initial F2P failures, P2P passes, and no localized edits.
+            return {"localization_reward": 0.0, "composite_reward": 0.0,
+                    "binary_reward": 0.0, "f2p_pass_fraction": 0.0, "p2p_fail_fraction": 0.0}
+        async with self._test_execution_semaphore:
+            test, info = await compute_test_execution_reward(snapshot["patch"], self._task.misc)
+        try:
+            localization, details = await asyncio.to_thread(
+                score_sources, snapshot["patch"], snapshot["before_sources"],
+                snapshot["after_sources"], self._task.misc.get("file_changes"),
+            )
+        except Exception as error:
+            # Preserve the existing localization processor's error-to-zero policy.
+            localization, details = 0.0, {"status": "error", "error": str(error)}
+            if snapshot.get("source_errors"):
+                details["source_errors"] = snapshot["source_errors"]
+        return {**info, "composite_reward": test,
+                "localization_reward": localization, "localization": details}
+
+    def _evaluate_turn(self):
+        step = self._current_step
+        completion = step.misc["action_misc"]["completion_id"]
+        patch_hash = self._completion_snapshots.get(completion, self._previous_patch_hash)
+        scores = self._snapshot_scores[patch_hash]
+        localization, test = scores["localization_reward"], scores["composite_reward"]
+        dl, dt = localization - self._best_localization, test - self._best_test
+        final = is_finished(self._state)
+        if not final:
+            dl, dt = max(dl, 0.0), max(dt, 0.0)
+        self._best_localization = max(self._best_localization, localization)
+        self._best_test = max(self._best_test, test)
+
+        events = [*(step.action_events or []), *(step.observation_events or [])]
+        json_reward, json_info = compute_tool_json_error_reward(events)
+        agent_reward, agent_info = compute_agent_error_reward(events)
+        _, editor_info = compute_str_replace_reward(events)
+        penalties = {
+            "tool_json_penalty": -0.05 if json_reward == 0 else 0.0,
+            "agent_error_penalty": -0.05 if agent_reward == 0 else 0.0,
+            "file_editor_penalty": -0.05 if editor_info["file_editor_errors"] else 0.0,
+        }
+        reward = 0.15 * dl + 0.70 * dt + sum(penalties.values())
+        info = {
+            **json_info, **agent_info, **editor_info, **penalties,
+            "reward_mode": "turn", "patch_hash": patch_hash,
+            "snapshot_unchanged": patch_hash == self._previous_patch_hash,
+            "localization_reward": localization, "composite_reward": test,
+            "localization_delta": dl, "test_execution_delta": dt,
+            "final_settlement": final, "total_reward": reward,
+        }
+        if final or patch_hash != self._previous_patch_hash:
+            info.update(scores)
+        self._previous_patch_hash = patch_hash
+        return reward, info
 
     async def evaluate(self) -> tuple[float, dict]:
+        if self._turn_rewards_enabled:
+            try:
+                return self._evaluate_turn()
+            except Exception as error:
+                self.turn_reward_error = str(error) or type(error).__name__
+                raise
         if not is_finished(self._state):
             return 0.0, {}
 
@@ -129,28 +227,5 @@ class SWERebenchEnv(OpenHandsEnv):
         # Select the training reward after computing all component diagnostics.
         if self._use_binary_reward:
             reward = float(test_execution_info.get("binary_reward", 0.0))
-        if not self._enable_length_penalty:
-            self._terminal_result = (reward, info)
-            return self._terminal_result
-
-        # One response may emit several tool calls or messages. Count it once.
-        response_ids = {
-            event.llm_response_id
-            for event in self._state.conversation_state.events
-            if is_action(event) and getattr(event, "llm_response_id", None)
-        }
-        num_turns = len(response_ids)
-        length_reward = (self._length_penalty_threshold - num_turns) / (
-            self._task.max_steps - self._length_penalty_threshold
-        )
-        length_reward_weight = 1.0
-        reward += length_reward_weight * length_reward
-        info.update(
-            length_reward=length_reward,
-            length_reward_weight=length_reward_weight,
-            num_agent_turns=num_turns,
-            length_penalty_threshold=self._length_penalty_threshold,
-            total_reward=reward,
-        )
         self._terminal_result = (reward, info)
         return self._terminal_result

@@ -75,6 +75,7 @@ async def compute_test_execution_reward(model_patch: str, instance: dict):
                 verbose=False,
                 named_server_image=named_agent_server_image_for_instance(instance),
             )
+        res.log_dir = str(res.log_dir)
         info = {"model_patch": model_patch, "evaluation_logs": asdict(res)}
         try:
             binary_reward = 1.0 if res.resolved else 0.0

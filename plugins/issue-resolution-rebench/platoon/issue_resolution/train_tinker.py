@@ -53,6 +53,9 @@ def main(args: list[str]):
         config_class=IssueResolutionTinkerConfig,
         default_config_path=str(default_config),
     )
+    config.train.workflow_config.rollout_config.extra["turn_rewards"] = (
+        config.train.algorithm == "ppo" and config.train.ppo.reward_mode == "turn"
+    )
     train_datamap, _ = load_data()
     train_dataset = Dataset.from_list([{"task_id": x} for x in train_datamap.keys()])
     # Create trainer and run with context manager for proper cleanup

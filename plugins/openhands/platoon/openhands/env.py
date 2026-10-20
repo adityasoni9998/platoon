@@ -11,6 +11,7 @@ from openhands.sdk.conversation import get_agent_final_response, BaseConversatio
 from openhands.sdk.conversation.exceptions import ConversationRunError
 from openhands.sdk.workspace import BaseWorkspace
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
+from openhands.sdk.hooks import HookConfig
 from platoon.envs.base import Task
 from platoon.episode.context import (
     current_trajectory,
@@ -39,6 +40,7 @@ class OpenHandsEnv:
         *,
         conversation_timeout: int = 1200,
         wait_for_completion: bool = False,
+        hook_config: HookConfig | None = None,
     ):
         self._task = task
         self._agent = agent
@@ -47,6 +49,7 @@ class OpenHandsEnv:
         self._workspace = workspace
         self._conversation_timeout = conversation_timeout
         self._wait_for_completion = wait_for_completion
+        self._hook_config = hook_config
         self._run_error: str | None = None
         self._conversation = None
         self._run_thread: threading.Thread | None = None
@@ -59,6 +62,7 @@ class OpenHandsEnv:
             workspace=self._workspace,
             visualizer=None,
             max_iteration_per_run=self._task.max_steps,
+            **({"hook_config": self._hook_config} if self._hook_config is not None else {}),
         )
         if isinstance(self._conversation, RemoteConversation):
             self._conversation.delete_on_close = True
@@ -144,9 +148,8 @@ class OpenHandsEnv:
             observation_events=obs_events,
         )
         step.misc["action_misc"] = action.misc
-        step.reward, reward_info = (0.0, {})
-        if not self._wait_for_completion or is_finished(self._state):
-            step.reward, reward_info = await self.evaluate()
+        self._current_step = step
+        step.reward, reward_info = await self.evaluate()
         step.misc["reward_misc"] = reward_info
         self._state.reward += step.reward
 

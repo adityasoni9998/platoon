@@ -44,8 +44,7 @@ Training overrides use the `--train.*` prefix.
 
 Set `train.workflow_config.rollout_config.extra.use_binary_reward` to `true`
 for resolved/not-resolved training rewards, or `false` for the existing weighted
-dense reward. All reward components are computed in either mode. The optional
-length reward is added separately; keep it disabled for purely binary rewards.
+dense reward. All reward components are computed in either mode.
 
 The launcher automatically exposes its local Tinker proxy through a temporary
 Modal HTTPS router. Agents call that URL; the proxy calls the upstream
@@ -64,8 +63,10 @@ The launcher stops the proxy and Modal router when training exits.
 The child waits for the `conversation.run()` thread to exit, then refreshes and
 reconciles once and freezes the events. The existing `reset/act/step` loop
 consumes that history, preserving completion IDs and tool-call grouping, and
-evaluates rewards once at the end. Steps appear in JSONL after the run exits;
-`step_timeout` still applies to each action/step, including final evaluation.
+evaluates terminal rewards at the end. In PPO turn mode, unique captured patches
+are scored after generation in `reset()`, and each `evaluate()` applies turn
+penalties and score deltas. Steps appear in JSONL after generation and snapshot
+scoring; `step_timeout` still applies to each action/step.
 Run failures use the underlying error message without the conversation-ID prefix.
 New subprocesses load this behavior immediately, but a running trainer keeps its
 already-loaded parent subprocess deadline until restart.

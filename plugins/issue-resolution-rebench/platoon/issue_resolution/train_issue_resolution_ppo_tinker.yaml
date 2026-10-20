@@ -1,4 +1,4 @@
-# PPO using Rebench's dense-ORM CISPO rewards and rollout settings.
+# PPO with turn-level tool penalties and settled localization/test deltas.
 # Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
 # batch_size counts tasks: 64 tasks x 8 rollouts = up to 512 trajectories/batch.
 # 64 concurrent group workers allow up to 512 concurrent rollouts.
@@ -27,11 +27,8 @@ train:
     grad_clip_norm: 1.0
   ppo:
     value_granularity: turn
-    # Preserve dense outcome reward, assigned to the final agent turn.
-    # Intermediate tool penalties and localization/test deltas are not enabled.
-    reward_mode: terminal
+    reward_mode: turn
     advantage_normalization_granularity: turn
-    # Undiscounted terminal return: every turn targets the final dense ORM reward.
     gamma: 1.0
     gae_lambda: 1.0
     advantage_normalization: batch
@@ -63,8 +60,6 @@ train:
       extra:
         max_input_tokens: 62952
         use_binary_reward: false
-        enable_length_penalty: false
-        length_penalty_threshold: 10
       inference_params:
         temperature: 1.0
         max_completion_tokens: 2048
@@ -88,12 +83,12 @@ tinker_base_url: null
 
 stats:
   experiment_name: issue-resolution-rebench-tinker
-  trial_name: qwen3-4b-instruct-ppo-dense-orm-b64-g8
+  trial_name: qwen3-4b-instruct-ppo-turn-rewards-b64-g8
   wandb:
     mode: online
     project: issue_resolution-miles
     entity: null
-    tags: [issue_resolution, swe_rebench, tinker, ppo, dense_orm, turn_critic]
+    tags: [issue_resolution, swe_rebench, tinker, ppo, dense_orm, turn_critic, turn_rewards]
 
 inference_tunnel:
   backend: modal

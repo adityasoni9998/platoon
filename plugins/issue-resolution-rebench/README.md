@@ -47,22 +47,9 @@ response containing `<tool_call>` or `</tool_call>` earns 0 for JSON formatting
 `ObservationEvent` results for `file_editor` with `observation.is_error`; no
 file-editor results earns 0. This includes all file-editor operations.
 
-Length reward is disabled for the initial run. The total reward uses upstream weights:
+The total reward uses upstream weights:
 `0.70 * composite_reward + 0.15 * localization_reward + 0.05 * tool_json_error_reward
-+ 0.05 * agent_error_event_reward + 0.05 * str_replace_reward`. To enable length reward later, set
-`workflow_config.rollout_config.extra.enable_length_penalty: true` in YAML.
-When enabled, add `(threshold - turns) / (max_turns - threshold)` to that total,
-with the length coefficient fixed at `1.0`. `turns` counts unique nonempty LLM
-response IDs on agent action/message events, so multiple tool calls from one
-response count as one turn. Set
-`workflow_config.rollout_config.extra.length_penalty_threshold` in YAML
-(default `10`); it must be an integer from zero up to, but excluding,
-`workflow_config.rollout_config.max_steps`. The formula is not clamped: with
-40 maximum turns, 1/10/25/40 turns yield length rewards of +0.3/0/−0.5/−1.
-The length term is computed from the OpenHands event stream alongside the
-test execution reward in terminal `evaluate()` calls. The returned reward info records
-both components and the turn count. Partial trajectories that time out before
-terminal evaluation receive no additional length reward during cleanup.
++ 0.05 * agent_error_event_reward + 0.05 * str_replace_reward`.
 
 This does not guarantee that every rollout contributes loss. Groups with
 identical rewards are marked non-trainable and removed before model work,
@@ -74,6 +61,46 @@ The SDK dependencies are pinned to `5acdf05`, which is the revision embedded in
 the named images. The SWE-rebench harness is pinned to the fork commit
 `1e5839b` (package version 4.0.3), and Modal is pinned to 1.5.5. Do not update
 the SDK pin without rebuilding and republishing the named images.
+
+## PPO turn rewards
+
+The PPO Tinker recipe sets `ppo.reward_mode: turn`. The training entry point
+derives the rollout's `turn_rewards` flag from the algorithm and reward mode;
+no separate YAML flag is needed. Each completion receives
+`0.15 * localization_delta + 0.70 * test_delta`, with a separate `-0.05`
+penalty for malformed tool JSON, an agent tool error, and a file-editor error.
+Each penalty is applied at most once per completion, including parallel calls.
+
+Localization and test scores start at zero: initial F2P tests are assumed to
+fail and P2P tests to pass. Intermediate turns receive only improvements over
+their respective best previous scores; the last turn receives the actual final
+score minus that best score, including negative values. This also happens when
+the last turn leaves the patch unchanged
+
+Workspace preparation performs the existing cleanup and installs a synchronous
+`PostToolUse` hook at `/tmp/hooks/capture_patch.py`. The hook compares against
+`instance["base_commit"]`, using a private Git index without changing the agent's
+staging or deleting files. Agent commits do not move the baseline. Each unique
+patch and its before/after Python sources is appended to
+`/tmp/hooks/captures/snapshots.jsonl`; hook stdout contains only its patch hash.
+The pinned SDK completes the tool batch before emitting observations and hooks.
+Background processes that keep editing after tools return are not synchronized.
+
+Rebench's `reset()` first waits for generation through the parent implementation,
+then downloads JSONL and evaluates unique nonempty snapshots concurrently. The
+existing localization `score_sources()` and test executor are unchanged; tests
+retain their patch-application fallbacks and five-minute timeout. Empty patches
+have zero scores without test execution. Snapshot JSONL is downloaded temporarily
+under the rollout output's `turn_rewards/` directory and deleted after loading.
+Cached score diagnostics are saved in that directory.
+
+The normal step loop calls `evaluate()` for each parsed completion. It looks up
+that completion's capture (or carries forward the previous capture for a turn
+without tool execution), computes formatting penalties, and applies the running
+best-score deltas. Explicit hook failures or missing captures for executed tools
+reject the rollout. Scoring retains the existing processors' error policies.
+There is no separate turn-reward timeout or evaluator redeployment requirement
+for this feature. Terminal reward mode remains available with turn rewards disabled.
 
 ## One-time environment setup
 

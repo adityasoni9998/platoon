@@ -81,7 +81,7 @@ def scenario(monkeypatch):
         monkeypatch.setattr(env_module, name, Mock(return_value=(1.0, {name: 1.0})))
     env = env_module.SWERebenchEnv(
         task=Task(id='test', goal='fix it', max_steps=40, misc={'repo_path': '/testbed'}),
-        agent=None, workspace='/tmp', length_penalty_threshold=10, use_binary_reward=True,
+        agent=None, workspace='/tmp', use_binary_reward=True,
         conversation_timeout=1800, wait_for_completion=True,
     )
     env.close = AsyncMock()
@@ -141,6 +141,101 @@ def test_waits_freezes_and_rewards_once(scenario, status, binary):
     s.conversation.state.events.add_event(final_events()[0])
     assert s.env._state.conversation_state.events == snapshot
     assert len(snapshot) == len(s.events)
+
+
+def test_subprocess_timeout_override_cancels_child(monkeypatch):
+    from platoon.issue_resolution import tinker_workflow
+
+    async def check():
+        stopped = asyncio.Event()
+        process = SimpleNamespace(returncode=None)
+
+        async def wait():
+            await stopped.wait()
+
+        def terminate():
+            process.returncode = -15
+            stopped.set()
+
+        process.wait = wait
+        process.terminate = Mock(side_effect=terminate)
+        monkeypatch.setattr(tinker_workflow.asyncio, 'create_subprocess_exec',
+                            AsyncMock(return_value=process))
+        rollout = tinker_workflow.TinkerProxyRollout(lambda: None, None)
+        config = SimpleNamespace(timeout=1800, extra={'subprocess_timeout': .01})
+        with pytest.raises(TimeoutError, match='exceeded 0.01s'):
+            await asyncio.wait_for(
+                rollout._run_subprocess(SimpleNamespace(id='test'), config), timeout=1,
+            )
+        process.terminate.assert_called_once()
+
+    asyncio.run(check())
+
+
+def test_turn_rewards_are_scored_after_generation_and_consumed_by_completion(scenario, monkeypatch, tmp_path):
+    import json
+    from openhands.sdk.event.hook_execution import HookExecutionEvent
+    from platoon.issue_resolution.turn_snapshots import EMPTY_PATCH_HASH, capture_command
+    from platoon.issue_resolution.tool_error_reward.str_replace_errors import compute_str_replace_reward
+
+    s = scenario
+    s.env._turn_rewards_enabled = True
+    s.env._use_binary_reward = False
+    s.env._reward_artifact_dir = tmp_path
+    s.env._task.misc.update(base_commit='base', file_changes=[])
+    command = capture_command(s.env._task.misc)
+    actions = [e for e in s.events if isinstance(e, ActionEvent)]
+    s.events.insert(-2, HookExecutionEvent(hook_event_type='PostToolUse', hook_command=command,
+        action_id=actions[1].id, success=True, exit_code=0, stdout=json.dumps({'patch_hash': 'best'})))
+    s.events.append(HookExecutionEvent(hook_event_type='PostToolUse', hook_command=command,
+        action_id=actions[2].id, success=True, exit_code=0, stdout=json.dumps({'patch_hash': 'regressed'})))
+    snapshots = {key: {'patch': patch, 'before_sources': {}, 'after_sources': {}}
+                 for key, patch in [(EMPTY_PATCH_HASH, ''), ('best', 'best'), ('regressed', 'regressed')]}
+
+    def download(*args):
+        assert s.server.status == 'finished'
+        return snapshots
+
+    monkeypatch.setattr(env_module, 'download_snapshots', download)
+    monkeypatch.setattr(env_module, 'compute_str_replace_reward', compute_str_replace_reward)
+    monkeypatch.setattr(env_module, 'score_sources', lambda patch, *_: (
+        .6 if patch == 'best' else .2, {'status': 'success'}))
+    started = set()
+    ready = asyncio.Event()
+
+    async def test_reward(patch, instance):
+        assert s.server.status == 'finished'
+        assert patch  # The initial baseline must not execute tests.
+        started.add(patch)
+        if len(started) == 2:
+            ready.set()
+        await ready.wait()  # Both distinct snapshots must be scheduled concurrently.
+        return (.8 if patch == 'best' else .3), {
+            'binary_reward': 0.0, 'model_patch': patch,
+            'evaluation_logs': {'run_instance_log': f'Tested {patch}'},
+        }
+
+    evaluator = AsyncMock(side_effect=test_reward)
+    monkeypatch.setattr(env_module, 'compute_test_execution_reward', evaluator)
+
+    def run(timeout):
+        evaluator.assert_not_awaited()
+        s.server.events = s.events
+        s.server.status = 'finished'
+
+    s.conversation.run = run
+    trajectory = asyncio.run(episode(s))
+    assert [step.reward for step in trajectory.steps] == pytest.approx([0, .65, -.41])
+    assert trajectory.reward == pytest.approx(.24)
+    assert evaluator.await_count == 2
+    assert s.env.turn_reward_error is None
+    assert not (tmp_path / 'scores.json').exists()
+    for step, patch in zip(trajectory.steps[1:], ['best', 'regressed'], strict=True):
+        info = step.misc['reward_misc']
+        assert info['model_patch'] == patch
+        assert info['evaluation_logs']['run_instance_log'] == f'Tested {patch}'
+        assert info['localization']['status'] == 'success'
+    s.localization.assert_not_called()
 
 
 @pytest.mark.parametrize('case', ['message_then_finish', 'missing_tool_result', 'partial_batch',
