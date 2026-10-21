@@ -6,41 +6,53 @@ import json
 import math
 import os
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import tinker
-import torch
+from numpy.typing import NDArray
 from tinker import TensorData
 
 MANIFEST_NAME = "ppo_checkpoints.jsonl"
 
 
-def compute_gae(values: torch.Tensor, rewards: torch.Tensor, gamma: float, gae_lambda: float):
+@dataclass
+class PreparedDatum:
+    """Keep PPO working arrays local until constructing each role's SDK request."""
+
+    datum: tinker.Datum
+    mask: NDArray[np.bool_]
+    critic_mask: NDArray[np.bool_]
+    advantages: NDArray[np.float32]
+    returns: NDArray[np.float32]
+    old_values: NDArray[np.float32]
+
+
+def compute_gae(values: np.ndarray, rewards: np.ndarray, gamma: float, gae_lambda: float):
     """GAE over logical decisions, with zero bootstrap at the rollout endpoint.
 
     Use the equivalent lambda-return recurrence so lambda=1 produces discounted
     reward-to-go directly, without cancellation of intermediate critic values.
     Observation tokens and prefix-split boundaries are not decisions.
     """
-    # Avoid dispatching scalar Torch operations for every decision. Python floats
-    # also keep the recurrence in double precision until the final tensor cast.
+    # Python floats keep the recurrence in double precision until the final array cast.
     value_list, reward_list = values.tolist(), rewards.tolist()
     return_list = [0.0] * len(value_list)
     next_return = next_value = 0.0
     for index in reversed(range(len(value_list))):
         return_list[index] = reward_list[index] + gamma * ((1 - gae_lambda) * next_value + gae_lambda * next_return)
         next_return, next_value = return_list[index], value_list[index]
-    returns = values.new_tensor(return_list)
+    returns = np.asarray(return_list, dtype=values.dtype)
     return returns - values, returns
 
 
-def _action_blocks(mask: torch.Tensor) -> list[tuple[int, int]]:
+def _action_blocks(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
     # Target-aligned mask: the value at a block's start is computed from the
     # final prompt token, before generating the first action token.
-    padded = torch.cat((mask.new_zeros(1), mask, mask.new_zeros(1))).int()
-    edges = padded.diff()
-    return list(zip((edges == 1).nonzero().flatten().tolist(), (edges == -1).nonzero().flatten().tolist()))
+    padded = np.pad(mask.astype(np.int8), (1, 1))
+    edges = np.diff(padded)
+    return list(zip(np.flatnonzero(edges == 1).tolist(), np.flatnonzero(edges == -1).tolist()))
 
 
 def prepare_batch(
@@ -52,7 +64,7 @@ def prepare_batch(
     gae_lambda: float = 1.0,
     value_granularity: str = "token",
     advantage_normalization_granularity: str | None = None,
-) -> tuple[list[tinker.Datum], dict]:
+) -> tuple[list[PreparedDatum], dict]:
     """Compute rollout-wide GAE, then freeze critic targets and whiten actor advantages.
 
     Datums may arrive in any order. Each carries a trajectory key, an inclusive
@@ -76,9 +88,9 @@ def prepare_batch(
     values, masks, blocks = [], [], []
     for index, (datum, output) in enumerate(zip(datums, outputs, strict=True)):
         inputs = datum.loss_fn_inputs
-        mask = inputs["mask"].to_torch().bool()
-        value = output["values"].to_torch().float()
-        logprobs = inputs["logprobs"].to_torch()
+        mask = inputs["mask"].to_numpy().astype(np.bool_, copy=False)
+        value = output["values"].to_numpy().astype(np.float32, copy=False)
+        logprobs = inputs["logprobs"].to_numpy()
 
         if not (value.shape == mask.shape == logprobs.shape):
             raise ValueError("PPO values, logprobs, and action masks must align with target tokens")
@@ -88,7 +100,7 @@ def prepare_batch(
         if not mask.any():
             continue
         key = inputs["_ppo_trajectory_id"].data[0]
-        first, last = inputs["_ppo_turn_range"].to_torch().tolist()
+        first, last = inputs["_ppo_turn_range"].to_numpy().tolist()
         if not (
             len(blocks[index])
             == last - first + 1
@@ -98,10 +110,10 @@ def prepare_batch(
             raise ValueError("PPO turn range/rewards must match the action-mask blocks")
         groups.setdefault(key, []).append((first, last, index))
 
-    advantages = [torch.zeros_like(value) for value in values]
-    returns = [torch.zeros_like(value) for value in values]
-    actor_masks = [torch.zeros_like(mask) for mask in masks]
-    critic_masks = [torch.zeros_like(mask) for mask in masks]
+    advantages = [np.zeros_like(value) for value in values]
+    returns = [np.zeros_like(value) for value in values]
+    actor_masks = [np.zeros_like(mask) for mask in masks]
+    critic_masks = [np.zeros_like(mask) for mask in masks]
     for segments in groups.values():
         turns = []
         expected_turn = 0
@@ -110,20 +122,20 @@ def prepare_batch(
                 raise ValueError("PPO trajectory has missing or overlapping turns")
             expected_turn = last + 1
             inputs = datums[index].loss_fn_inputs
-            rewards = inputs["_ppo_rewards"].to_torch().tolist()
-            train_turns = inputs["_ppo_train_turns"].to_torch().tolist()
+            rewards = inputs["_ppo_rewards"].to_numpy().tolist()
+            train_turns = inputs["_ppo_train_turns"].to_numpy().tolist()
             turns.extend(
                 (index, start, end, reward, train)
                 for (start, end), reward, train in zip(blocks[index], rewards, train_turns, strict=True)
             )
 
-        decision_values = torch.cat(
+        decision_values = np.concatenate(
             [
                 values[index][start:end] if value_granularity == "token" else values[index][start : start + 1]
                 for index, start, end, _, _ in turns
             ]
         )
-        decision_rewards = torch.zeros_like(decision_values)
+        decision_rewards = np.zeros_like(decision_values)
         offset = 0
         for _, start, end, reward, _ in turns:
             offset += end - start if value_granularity == "token" else 1
@@ -144,16 +156,13 @@ def prepare_batch(
         if not actor_masks[index].any():
             continue
         prepared.append(
-            tinker.Datum(
-                model_input=datum.model_input,
-                loss_fn_inputs={
-                    **datum.loss_fn_inputs,
-                    "mask": TensorData.from_torch(actor_masks[index].float()),
-                    "critic_mask": TensorData.from_torch(critic_masks[index].float()),
-                    "returns": TensorData.from_torch(torch.where(critic_masks[index], returns[index], 0.0)),
-                    "old_values": TensorData.from_torch(torch.where(critic_masks[index], values[index], 0.0)),
-                    "advantages": TensorData.from_torch(torch.where(actor_masks[index], advantages[index], 0.0)),
-                },
+            PreparedDatum(
+                datum=datum,
+                mask=actor_masks[index],
+                critic_mask=critic_masks[index],
+                returns=np.where(critic_masks[index], returns[index], np.float32(0)),
+                old_values=np.where(critic_masks[index], values[index], np.float32(0)),
+                advantages=np.where(actor_masks[index], advantages[index], np.float32(0)),
             )
         )
     if not prepared:
@@ -161,59 +170,63 @@ def prepare_batch(
     metrics = {}
     for field in ("old_values", "returns", "advantages"):
         mask_key = advantage_mask_key if field == "advantages" else "critic_mask"
-        flat = torch.cat(
-            [d.loss_fn_inputs[field].to_torch()[d.loss_fn_inputs[mask_key].to_torch().bool()] for d in prepared]
-        )
+        flat = np.concatenate([getattr(d, field)[getattr(d, mask_key)] for d in prepared])
         label = "raw_advantages" if field == "advantages" else field
         metrics[f"critic/{label}_mean"] = flat.mean().item()
-        metrics[f"critic/{label}_std"] = flat.std(unbiased=False).item()
+        metrics[f"critic/{label}_std"] = flat.std().item()
         metrics[f"critic/{label}_min"] = flat.min().item()
         metrics[f"critic/{label}_max"] = flat.max().item()
         if field == "advantages":
             adv_mean = flat.mean()
-            adv_std = flat.std(unbiased=False)
+            adv_std = flat.std()
     if normalization == "batch":
         for datum in prepared:
-            mask = datum.loss_fn_inputs["mask"].to_torch().bool()
-            adv = datum.loss_fn_inputs["advantages"].to_torch()
-            datum.loss_fn_inputs["advantages"] = TensorData.from_torch(
-                torch.where(mask, (adv - adv_mean) / torch.sqrt(adv_std.square() + 1e-8), 0.0)
+            datum.advantages = np.where(
+                datum.mask,
+                (datum.advantages - adv_mean) / np.sqrt(adv_std * adv_std + np.float32(1e-8)),
+                np.float32(0),
             )
-    normalized = torch.cat(
-        [
-            d.loss_fn_inputs["advantages"].to_torch()[d.loss_fn_inputs[advantage_mask_key].to_torch().bool()]
-            for d in prepared
-        ]
-    )
+    normalized = np.concatenate([d.advantages[getattr(d, advantage_mask_key)] for d in prepared])
     metrics["critic/normalized_advantages_mean"] = normalized.mean().item()
-    metrics["critic/normalized_advantages_std"] = normalized.std(unbiased=False).item()
+    metrics["critic/normalized_advantages_std"] = normalized.std().item()
     metrics["critic/normalized_advantages_min"] = normalized.min().item()
     metrics["critic/normalized_advantages_max"] = normalized.max().item()
     return prepared, metrics
 
 
-def loss_datums(datums: list[tinker.Datum], role: str) -> list[tinker.Datum]:
+def loss_datums(datums: list[PreparedDatum], role: str) -> list[tinker.Datum]:
     """Mean critic loss over value positions; mean actor loss over action tokens."""
     mask_key = "critic_mask" if role == "critic" else "mask"
-    count = sum(d.loss_fn_inputs[mask_key].to_torch().sum().item() for d in datums)
-    scale = 1.0 / (count + 1e-8)
+    count = sum(np.count_nonzero(getattr(d, mask_key)) for d in datums)
+    scale = np.float32(1.0 / (count + 1e-8))
     output = []
     for datum in datums:
-        inputs = datum.loss_fn_inputs
-        mask = inputs[mask_key].to_torch().float()
+        inputs = datum.datum.loss_fn_inputs
         fields = {"target_tokens": inputs["target_tokens"]}
         if role == "critic":
             fields.update(
-                values=inputs["old_values"],
-                returns=inputs["returns"],
-                weights=TensorData.from_torch(mask * scale),
+                values=TensorData.from_numpy(datum.old_values),
+                returns=TensorData.from_numpy(datum.returns),
+                weights=TensorData.from_numpy(datum.critic_mask * scale),
             )
         else:
-            fields.update(
-                logprobs=inputs["logprobs"], advantages=TensorData.from_torch(inputs["advantages"].to_torch() * scale)
-            )
-        output.append(tinker.Datum(model_input=datum.model_input, loss_fn_inputs=fields))
+            fields.update(logprobs=inputs["logprobs"], advantages=TensorData.from_numpy(datum.advantages * scale))
+        output.append(tinker.Datum(model_input=datum.datum.model_input, loss_fn_inputs=fields))
     return output
+
+
+def _actor_metric_datums(datums: list[PreparedDatum]) -> list[tinker.Datum]:
+    """Adapt only the fields consumed by the shared actor-metrics implementation."""
+    return [
+        tinker.Datum(
+            model_input=d.datum.model_input,
+            loss_fn_inputs={
+                "mask": TensorData.from_numpy(d.mask.astype(np.float32)),
+                "logprobs": d.datum.loss_fn_inputs["logprobs"],
+            },
+        )
+        for d in datums
+    ]
 
 
 async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> None:
@@ -276,7 +289,10 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
     if shared_state.train_step >= config.ppo.critic_warmup_batches:
         roles.append(("policy", actor, config.ppo.actor_epochs, config.optimizer, config.loss_fn_config))
     for role, client, epochs, optimizer, loss_config in roles:
+        start = time.perf_counter()
         inputs = loss_datums(prepared, role)
+        metric_inputs = _actor_metric_datums(prepared) if role == "policy" else []
+        tracker.scalar(**{f"timing/{role}_prepare_inputs": time.perf_counter() - start})
         loss_fn = "ppo" if role == "critic" else config.loss_fn
         timings = dict(
             forward_backward_submit=0.0, forward_backward_wait=0.0, optim_step_submit=0.0, optim_step_wait=0.0
@@ -296,22 +312,20 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
                 raise ValueError(f"Nonfinite {role} loss")
             if role == "critic":
                 deltas = [
-                    (output["values"].to_torch() - datum.loss_fn_inputs["old_values"].to_torch())[
-                        datum.loss_fn_inputs["critic_mask"].to_torch().bool()
-                    ]
+                    (output["values"].to_numpy() - datum.old_values)[datum.critic_mask]
                     for datum, output in zip(prepared, result.loss_fn_outputs, strict=True)
                 ]
                 tracker.scalar(
                     **{
                         "critic/value_loss": loss,
-                        "critic/value_clipfrac": (torch.cat(deltas).abs() > config.ppo.critic.value_clip)
-                        .float()
+                        "critic/value_clipfrac": (np.abs(np.concatenate(deltas)) > config.ppo.critic.value_clip)
+                        .astype(np.float32)
                         .mean()
                         .item(),
                     }
                 )
             else:
-                tracker.scalar(**compute_training_metrics(prepared, result, loss_fn, loss_config))
+                tracker.scalar(**compute_training_metrics(metric_inputs, result, loss_fn, loss_config))
                 tracker.scalar(**{"optim/pg_loss": loss})
             start = time.perf_counter()
             result = await resolve(optim_future, f"{role} optim_step")
