@@ -1,15 +1,18 @@
 # PPO with turn-level tool penalties and settled localization/test deltas.
+# env.py fixes turn reward weights at 0.30 localization and 0.70 testing.
+# Each of the three tool-error categories costs 0.05 per turn; max total reward is 1.0.
+# Intermediate quality deltas are nonnegative; the final turn settles regressions.
 # Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
-# batch_size counts tasks: 64 tasks x 8 rollouts = up to 512 trajectories/batch.
-# 64 concurrent group workers allow up to 512 concurrent rollouts.
+# batch_size counts tasks: 512 tasks x 1 rollout = up to 512 trajectories/batch.
+# 512 concurrent group workers preserve the previous rollout concurrency.
 train:
   algorithm: ppo
   model_name: Qwen/Qwen3-4B-Instruct-2507
   renderer_name: qwen3_instruct_exact
   context_window_length: 65000
-  batch_size: 64
-  num_epochs: 2
-  max_training_steps: null
+  batch_size: 512
+  num_epochs: null  # Use the 500-step budget instead of an epoch limit.
+  max_training_steps: 500  # Includes 12 critic-only steps, then 488 actor/critic steps.
   num_minibatches: 1
   num_microbatches: 1
   max_staleness: 1
@@ -29,12 +32,13 @@ train:
     value_granularity: turn
     reward_mode: turn
     advantage_normalization_granularity: turn
+    # gamma=lambda=1 gives undiscounted reward-to-go, including final settlement.
     gamma: 1.0
     gae_lambda: 1.0
     advantage_normalization: batch
     actor_epochs: 1
     critic_epochs: 1
-    critic_warmup_batches: 1
+    critic_warmup_batches: 12  # One loader epoch: floor(6542 / 512), with drop_last=True.
     critic:
       value_clip: 0.2
       num_minibatches: 1
@@ -47,7 +51,7 @@ train:
         weight_decay: 0.1
         grad_clip_norm: 1.0
   workflow_config:
-    group_size: 8
+    group_size: 1
     leave_one_out_baseline: false
     depth_level_weighting: false
     filter_zero_variance_groups: false
@@ -63,15 +67,15 @@ train:
       inference_params:
         temperature: 1.0
         max_completion_tokens: 2048
-  num_concurrent_rollout_workflow_workers: 64
+  num_concurrent_rollout_workflow_workers: 512
 
 eval:
   strategy: none
 
 checkpoint:
   strategy: step
-  # Counts trainer batches, including the initial critic-only warmup batch.
-  # First scheduled save: 9 actor updates and 10 critic updates.
+  # Counts trainer batches, including the 12 critic-only warmup batches.
+  # The first scheduled save is during critic warmup.
   every: 10
   load_checkpoint_path: null
 
@@ -83,7 +87,7 @@ tinker_base_url: null
 
 stats:
   experiment_name: issue-resolution-rebench-tinker
-  trial_name: qwen3-4b-instruct-ppo-turn-rewards-b64-g8
+  trial_name: qwen3-4b-instruct-ppo-turn-rewards-b512-g1
   wandb:
     mode: online
     project: issue_resolution-miles

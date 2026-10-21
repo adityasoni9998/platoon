@@ -147,7 +147,7 @@ class SWERebenchEnv(OpenHandsEnv):
             "agent_error_penalty": -0.05 if agent_reward == 0 else 0.0,
             "file_editor_penalty": -0.05 if editor_info["file_editor_errors"] else 0.0,
         }
-        reward = 0.15 * dl + 0.70 * dt + sum(penalties.values())
+        reward = 0.30 * dl + 0.70 * dt + sum(penalties.values())
         info = {
             **json_info, **agent_info, **editor_info, **penalties,
             "reward_mode": "turn", "patch_hash": patch_hash,
