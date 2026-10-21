@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import shlex
+import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -55,13 +58,19 @@ os.execv("/usr/sbin/sshd", ["/usr/sbin/sshd", "-D", "-e", "-f", str(config)])
 '''
 
 
-def wait_for_ssh(sandbox, host: str, port: int) -> None:
+def wait_for_ssh(sandbox, host: str, port: int, *, tls: bool = False) -> None:
     # Modal tunnel allocation can precede sshd readiness.
     deadline = time.monotonic() + 120
+    context = ssl.create_default_context() if tls else None
     while time.monotonic() < deadline:
         try:
             with socket.create_connection((host, port), timeout=3) as connection:
-                if connection.recv(256).startswith(b"SSH-"):
+                if context is None:
+                    banner = connection.recv(256)
+                else:
+                    with context.wrap_socket(connection, server_hostname=host) as secured:
+                        banner = secured.recv(256)
+                if banner.startswith(b"SSH-"):
                     return
         except OSError:
             pass
@@ -75,6 +84,9 @@ def wait_for_ssh(sandbox, host: str, port: int) -> None:
 def modal_tunnels(proxy_urls: list[str], config: ModalRouterConfig):
     """Own a Modal router, its temporary keys, and one reverse SSH connection."""
     import modal
+
+    if config.ssh_over_tls and shutil.which("openssl") is None:
+        raise RuntimeError("Modal SSH-over-TLS requires openssl on the client node")
 
     with tempfile.TemporaryDirectory(prefix="platoon-modal-router-") as directory:
         key_dir = Path(directory)
@@ -99,8 +111,8 @@ def modal_tunnels(proxy_urls: list[str], config: ModalRouterConfig):
             cpu=config.cpu,
             memory=config.memory,
             timeout=config.timeout,
-            encrypted_ports=ports,
-            unencrypted_ports=[SSH_PORT],
+            encrypted_ports=ports + ([SSH_PORT] if config.ssh_over_tls else []),
+            unencrypted_ports=[] if config.ssh_over_tls else [SSH_PORT],
             secrets=[
                 modal.Secret.from_dict(
                     {
@@ -115,8 +127,13 @@ def modal_tunnels(proxy_urls: list[str], config: ModalRouterConfig):
         try:
             logger.info("Created Modal inference router %s", sandbox.object_id)
             tunnels = sandbox.tunnels(timeout=120)
-            host, port = tunnels[SSH_PORT].tcp_socket
-            wait_for_ssh(sandbox, host, port)
+            ssh_tunnel = tunnels[SSH_PORT]
+            if config.ssh_over_tls:
+                host, port = ssh_tunnel.host, ssh_tunnel.port
+                wait_for_ssh(sandbox, host, port, tls=True)
+            else:
+                host, port = ssh_tunnel.tcp_socket
+                wait_for_ssh(sandbox, host, port)
             options = (
                 "-p",
                 str(port),
@@ -131,6 +148,16 @@ def modal_tunnels(proxy_urls: list[str], config: ModalRouterConfig):
                 "-o",
                 "HostKeyAlias=platoon-modal-router",
             )
+            if config.ssh_over_tls:
+                proxy = shlex.join(
+                    [
+                        "openssl", "s_client", "-quiet", "-no_ign_eof",
+                        # Never interpret SSH ciphertext as interactive s_client commands.
+                        "-nocommands", "-connect", f"{host}:{port}",
+                        "-servername", host, "-verify_return_error", "-verify_hostname", host,
+                    ]
+                )
+                options += ("-o", f"ProxyCommand={proxy}")
             with ssh_connection(f"root@{host}", options) as forward:
                 endpoints = {}
                 for url, port in zip(proxy_urls, ports, strict=True):

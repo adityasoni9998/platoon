@@ -88,6 +88,11 @@ actual local HTTP endpoint and export its `TINKER_API_KEY`. Keeping the public
 Modal URL still sends SDK requests through that relay. The OpenHands agents
 continue to reach Platoon's inference router through Modal.
 
+On ABCI, add `--inference_tunnel.modal.ssh_over_tls true` so the proxy's reverse
+SSH connection uses verified TLS on Modal port 443 instead of an outbound plain
+TCP SSH port. This requires `openssl` on the client node and does not change PPO
+or sampling settings. The default remains plain SSH for existing launchers.
+
 From `plugins/issue-resolution-rebench`, launch a fresh, two-batch profiling run:
 
 ```bash

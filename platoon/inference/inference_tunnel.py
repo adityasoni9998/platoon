@@ -19,6 +19,7 @@ class ModalRouterConfig:
     cpu: float = 0.125
     memory: int = 128
     timeout: int = 86400
+    ssh_over_tls: bool = False
 
 
 @dataclass

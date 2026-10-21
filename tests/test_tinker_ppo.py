@@ -7,6 +7,7 @@ from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import tinker
 import torch
@@ -22,6 +23,7 @@ from platoon.train.tinker.config_defs import (
 )
 from platoon.train.tinker.ppo import (
     MANIFEST_NAME,
+    _actor_metric_datums,
     load_resume_manifest,
     loss_datums,
     prepare_batch,
@@ -79,11 +81,11 @@ def test_terminal_returns_and_first_action_alignment_across_datums():
     original = [datum(1), datum(1), datum(0)]  # first two may be prefix breaks in the same trajectory
     predictions = [{"values": tensor([999.0, 0.2, 0.6])} for _ in original]
     prepared, _ = prepare_batch(original, predictions, "none")
-    torch.testing.assert_close(prepared[0].loss_fn_inputs["advantages"].to_torch(), torch.tensor([0.0, 0.8, 0.4]))
-    torch.testing.assert_close(prepared[1].loss_fn_inputs["returns"].to_torch(), torch.tensor([0.0, 1.0, 1.0]))
-    torch.testing.assert_close(prepared[2].loss_fn_inputs["advantages"].to_torch(), torch.tensor([0.0, -0.2, -0.6]))
+    np.testing.assert_allclose(prepared[0].advantages, [0.0, 0.8, 0.4])
+    np.testing.assert_array_equal(prepared[1].returns, [0.0, 1.0, 1.0])
+    np.testing.assert_allclose(prepared[2].advantages, [0.0, -0.2, -0.6])
     # The prediction at the final prompt INPUT position is kept: target there is an action.
-    assert prepared[0].loss_fn_inputs["old_values"].to_torch().tolist() == pytest.approx([0.0, 0.2, 0.6])
+    assert prepared[0].old_values.tolist() == pytest.approx([0.0, 0.2, 0.6])
     assert original[0].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, 1.0, 1.0]
 
 
@@ -98,12 +100,12 @@ def test_whitening_is_global_and_does_not_modify_critic_returns(granularity):
         "batch",
         advantage_normalization_granularity=granularity,
     )
-    flat = torch.cat([d.loss_fn_inputs["advantages"].to_torch()[1:] for d in prepared])
+    flat = np.concatenate([d.advantages[1:] for d in prepared])
     assert flat.mean().item() == pytest.approx(0.0, abs=1e-6)
-    assert flat.std(unbiased=False).item() == pytest.approx(1.0, abs=1e-6)
-    assert prepared[0].loss_fn_inputs["returns"].to_torch().tolist() == [0.0, 1.0, 1.0]
-    assert prepared[1].loss_fn_inputs["returns"].to_torch().tolist() == [0.0, 0.0, 0.0]
-    assert all(d.loss_fn_inputs["advantages"].to_torch()[0] == 0 for d in prepared)
+    assert flat.std().item() == pytest.approx(1.0, abs=1e-6)
+    assert prepared[0].returns.tolist() == [0.0, 1.0, 1.0]
+    assert prepared[1].returns.tolist() == [0.0, 0.0, 0.0]
+    assert all(d.advantages[0] == 0 for d in prepared)
 
 
 def test_critic_and_actor_token_normalization_and_frozen_data():
@@ -116,8 +118,68 @@ def test_critic_and_actor_token_normalization_and_frozen_data():
     assert critic["returns"].to_torch().tolist() == [0.0, 1.0, 1.0]
     assert "mask" not in actor and "loss_mask" not in actor
     assert "advantages" not in critic
-    for key in before[0].loss_fn_inputs:
-        torch.testing.assert_close(prepared[0].loss_fn_inputs[key].to_torch(), before[0].loss_fn_inputs[key].to_torch())
+    for key in ("mask", "critic_mask", "old_values", "returns", "advantages"):
+        np.testing.assert_array_equal(getattr(prepared[0], key), getattr(before[0], key))
+    assert prepared[0].datum == before[0].datum
+
+
+def test_preparation_keeps_arrays_until_sdk_request_construction(monkeypatch):
+    rows = [datum()]
+    outputs = [{"values": tensor([0.0, 0.2, 0.6])}]
+    before = deepcopy((rows, outputs))
+    threads = torch.get_num_threads(), torch.get_num_interop_threads()
+
+    def unexpected_conversion(*args, **kwargs):
+        pytest.fail("PPO preparation must not serialize working arrays or convert them to Torch")
+
+    with monkeypatch.context() as patch:
+        for name in ("from_numpy", "from_torch", "to_torch"):
+            patch.setattr(TensorData, name, unexpected_conversion)
+        prepared, _ = prepare_batch(rows, outputs, "batch")
+
+    assert threads == (torch.get_num_threads(), torch.get_num_interop_threads())
+    assert (rows, outputs) == before
+    assert prepared[0].datum is rows[0]
+    for name in ("mask", "critic_mask"):
+        assert getattr(prepared[0], name).dtype == np.bool_
+    for name in ("advantages", "returns", "old_values"):
+        assert getattr(prepared[0], name).dtype == np.float32
+    actor = loss_datums(prepared, "policy")[0]
+    critic = loss_datums(prepared, "critic")[0]
+    assert set(actor.loss_fn_inputs) == {"target_tokens", "logprobs", "advantages"}
+    assert set(critic.loss_fn_inputs) == {"target_tokens", "values", "returns", "weights"}
+    assert actor.loss_fn_inputs["logprobs"] is rows[0].loss_fn_inputs["logprobs"]
+    for request in (actor, critic):
+        for field, data in request.loss_fn_inputs.items():
+            assert data.dtype == ("int64" if field == "target_tokens" else "float32")
+
+
+def test_actor_metrics_exclude_filtered_turns_with_prepared_mask():
+    from platoon.train.tinker.rl import compute_training_metrics
+
+    row = datum()
+    row.loss_fn_inputs.update(
+        mask=tensor([1.0, 0.0, 1.0]),
+        logprobs=tensor([-100.0, -100.0, -0.5]),
+        _ppo_turn_range=tensor([0, 1]),
+        _ppo_rewards=tensor([0.0, 1.0]),
+        _ppo_train_turns=tensor([0, 1]),
+    )
+    prepared, _ = prepare_batch([row], [{"values": tensor([0.0, 0.0, 0.0])}], "none")
+    metrics_input = _actor_metric_datums(prepared)
+    assert metrics_input[0].loss_fn_inputs["mask"].data == [0.0, 0.0, 1.0]
+    result = tinker.ForwardBackwardOutput(
+        loss_fn_output_type="ArrayRecord",
+        loss_fn_outputs=[{"logprobs": tensor([100.0, 100.0, -0.4])}],
+        metrics={"loss:sum": 0.0},
+    )
+    metrics = compute_training_metrics(
+        metrics_input, result, "ppo", {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2}
+    )
+    assert metrics["optim/kl_sample_train_v1"] == pytest.approx(-0.1)
+    assert metrics["optim/entropy"] == pytest.approx(0.5)
+    assert metrics["optim/importance_weight_mean"] == pytest.approx(np.exp(0.1))
+    assert metrics["optim/clip_frac_total"] == 0
 
 
 @pytest.mark.parametrize(
@@ -198,18 +260,16 @@ def test_real_prefix_conversion_keeps_observations_masked_and_terminal_targets()
         ],
         "none",
     )
-    torch.testing.assert_close(
-        prepared[0].loss_fn_inputs["advantages"].to_torch(), torch.tensor([0.0, 0.8, 0.7, 0.0, 0.6])
-    )
-    torch.testing.assert_close(prepared[1].loss_fn_inputs["advantages"].to_torch(), torch.tensor([0.0, 0.5, 0.4]))
+    np.testing.assert_allclose(prepared[0].advantages, [0.0, 0.8, 0.7, 0.0, 0.6])
+    np.testing.assert_allclose(prepared[1].advantages, [0.0, 0.5, 0.4])
 
 
 def test_degenerate_whitening_is_finite():
     row = datum(1)
     row.loss_fn_inputs["mask"] = tensor([0.0, 0.0, 1.0])
     rows, _ = prepare_batch([row], [{"values": tensor([0.0, 0.0, 0.0])}], "batch")
-    assert rows[0].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, 0.0, 0.0]
-    assert rows[0].loss_fn_inputs["returns"].to_torch().tolist() == [0.0, 0.0, 1.0]
+    assert rows[0].advantages.tolist() == [0.0, 0.0, 0.0]
+    assert rows[0].returns.tolist() == [0.0, 0.0, 1.0]
 
 
 @pytest.mark.parametrize("normalization", ["batch", "none"])
@@ -228,7 +288,7 @@ def test_zero_mask_datum_does_not_affect_targets_or_normalization(normalization)
     assert stats == expected_stats
     for row, expected_row in zip(actual, expected, strict=True):
         for key in ("returns", "old_values", "advantages"):
-            torch.testing.assert_close(row.loss_fn_inputs[key].to_torch(), expected_row.loss_fn_inputs[key].to_torch())
+            np.testing.assert_array_equal(getattr(row, key), getattr(expected_row, key))
 
 
 def test_yaml_config_loads_ppo_and_legacy_grpo():
