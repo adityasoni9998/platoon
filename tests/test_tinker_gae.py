@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import tinker
 import torch
@@ -53,8 +54,8 @@ def predictions(datums, per_turn_values):
 
 
 def action_values(datums, field):
-    ordered = sorted(datums, key=lambda d: d.loss_fn_inputs["_ppo_turn_range"].data[0])
-    return torch.cat([d.loss_fn_inputs[field].to_torch()[d.loss_fn_inputs["mask"].to_torch().bool()] for d in ordered])
+    ordered = sorted(datums, key=lambda d: d.datum.loss_fn_inputs["_ppo_turn_range"].data[0])
+    return torch.from_numpy(np.concatenate([getattr(d, field)[d.mask] for d in ordered]))
 
 
 @pytest.mark.parametrize("granularity", ["turn", "token"])
@@ -99,9 +100,9 @@ def test_discounted_gae_is_identical_for_merged_and_multiple_shorter_prefix_spli
 )
 def test_gae_matches_monte_carlo_td_and_intermediate_lambda(gamma, lam, targets):
     values = torch.tensor([0.2, 0.4, 0.6])
-    advantages, returns = compute_gae(values, torch.tensor([1.0, 2.0, 3.0]), gamma, lam)
-    torch.testing.assert_close(returns, torch.tensor(targets, dtype=torch.float32))
-    torch.testing.assert_close(advantages, returns - values)
+    advantages, returns = compute_gae(values.numpy(), np.array([1.0, 2.0, 3.0], dtype=np.float32), gamma, lam)
+    torch.testing.assert_close(torch.from_numpy(returns), torch.tensor(targets, dtype=torch.float32))
+    torch.testing.assert_close(torch.from_numpy(advantages), torch.from_numpy(returns) - values)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -112,12 +113,12 @@ def test_gae_terminal_returns_match_discount_powers_and_preserve_dtype(length, d
     if length:
         rewards[-1] = 1.0
     gamma = 0.999
-    advantages, returns = compute_gae(values, rewards, gamma, 1.0)
+    advantages, returns = compute_gae(values.numpy(), rewards.numpy(), gamma, 1.0)
     # With lambda=1 and one terminal reward, critic values drop out entirely.
     steps_to_terminal = torch.arange(length - 1, -1, -1, dtype=torch.float64)
     expected = (gamma**steps_to_terminal).to(dtype)
-    torch.testing.assert_close(returns, expected)
-    torch.testing.assert_close(advantages, expected - values)
+    torch.testing.assert_close(torch.from_numpy(returns), expected)
+    torch.testing.assert_close(torch.from_numpy(advantages), expected - values)
 
 
 def test_terminal_reward_mode_does_not_sum_step_rewards_and_keeps_rollouts_separate():
@@ -130,7 +131,7 @@ def test_terminal_reward_mode_does_not_sum_step_rewards_and_keeps_rollouts_separ
     rows = [a[1], b[0], a[0]]
     outputs = [{"values": TensorData.from_torch(torch.zeros(d.model_input.length))} for d in rows]
     prepared, _ = prepare_batch(rows, outputs, "none")
-    assert [d.loss_fn_inputs["returns"].data[-1] for d in prepared] == [9, 8, 9]
+    assert [d.returns[-1] for d in prepared] == [9, 8, 9]
 
 
 def test_adjacent_actions_are_split_to_preserve_mask_boundaries():
@@ -189,7 +190,7 @@ def test_turn_critic_whitening_granularity_preserves_critic_targets(merged, gran
     # Actor loss remains a mean over five tokens.
     torch.testing.assert_close(
         torch.cat([d.loss_fn_inputs["advantages"].to_torch() for d in loss_datums(prepared, "policy")]),
-        torch.cat([d.loss_fn_inputs["advantages"].to_torch() for d in prepared]) / 5,
+        torch.from_numpy(np.concatenate([d.advantages for d in prepared])) / 5,
     )
 
 
@@ -209,8 +210,7 @@ def test_token_whitening_excludes_observations_and_filtered_turns(merged, normal
     torch.testing.assert_close(action_values(prepared, "advantages"), torch.tensor(expected, dtype=torch.float32))
     assert stats["critic/raw_advantages_mean"] == pytest.approx(1.2)
     for datum in prepared:
-        inputs = datum.loss_fn_inputs
-        assert (inputs["advantages"].to_torch()[~inputs["mask"].to_torch().bool()] == 0).all()
+        assert (datum.advantages[~datum.mask] == 0).all()
 
 
 @pytest.mark.parametrize("value_granularity,normalization_granularity", [("token", "turn"), ("turn", "invalid")])

@@ -225,8 +225,8 @@ def test_turn_rewards_are_scored_after_generation_and_consumed_by_completion(sce
 
     s.conversation.run = run
     trajectory = asyncio.run(episode(s))
-    assert [step.reward for step in trajectory.steps] == pytest.approx([0, .65, -.41])
-    assert trajectory.reward == pytest.approx(.24)
+    assert [step.reward for step in trajectory.steps] == pytest.approx([0, .74, -.47])
+    assert trajectory.reward == pytest.approx(.27)
     assert evaluator.await_count == 2
     assert s.env.turn_reward_error is None
     assert not (tmp_path / 'scores.json').exists()

@@ -37,10 +37,39 @@ def main(argv=None):
     parser.add_argument('--dynamic-ylim', action='store_true', help='Autoscale each subplot y-axis')
     parser.add_argument('--window', type=int, help='Override averaging window')
     parser.add_argument('--alignment', choices=['centered', 'trailing'])
+    parser.add_argument('--output-dir', type=Path, help='Save figures separately from the input metrics')
+    parser.add_argument('--skip-first-steps', nargs=2, action='append', default=[],
+                        metavar=('RUN', 'N'), help='For RUN, omit zero-based training steps below N before smoothing (repeatable)')
+    parser.add_argument('--rebase-skipped-steps', action='store_true',
+                        help='Subtract each run\'s skipped step count from its plotted step numbers')
     args = parser.parse_args(argv)
     summary = json.loads((args.input_dir/'summary.json').read_text())
     with (args.input_dir/'metrics.csv').open() as f:
         rows = list(csv.DictReader(f))
+    original_runs = list(dict.fromkeys(r.get('run', '') for r in rows))
+    skip_first = {}
+    for run, count in args.skip_first_steps:
+        if run not in original_runs:
+            parser.error(f'Unknown run: {run}')
+        try:
+            count = int(count)
+        except ValueError:
+            parser.error('--skip-first-steps requires an integer count')
+        if count < 0 or run in skip_first:
+            parser.error('Skip counts must be nonnegative and run labels must be unique')
+        skip_first[run] = count
+    if args.rebase_skipped_steps and not skip_first:
+        parser.error('--rebase-skipped-steps requires --skip-first-steps')
+    rows = [r for r in rows if int(r['step']) >= skip_first.get(r.get('run', ''), 0)]
+    for run in original_runs:
+        if not any(r.get('run', '') == run for r in rows):
+            parser.error(f'No steps remain for {run}')
+    if args.rebase_skipped_steps:
+        for row in rows:
+            row['step'] = str(int(row['step']) - skip_first.get(row.get('run', ''), 0))
+    output_dir = args.output_dir or args.input_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    axis_label = 'Training step (warmup removed for selected runs)' if args.rebase_skipped_steps else 'Training step'
     if args.combined and not any(r['component'] == 'overall_reward' for r in rows):
         parser.error('Saved metrics lack overall reward. Regenerate from train_rollout using plot.py.')
     if not any(r['component'] == 'overall_localization' for r in rows):
@@ -87,6 +116,8 @@ def main(argv=None):
             for col_index, (metric, title) in enumerate(COLUMNS):
                 ax = axes[col_index, row_index] if args.horizontal else axes[row_index, col_index]
                 for run in runs:
+                    if run in summary.get('mean_only_runs', []) and metric != 'reward':
+                        continue
                     data = sorted((r for r in rows if r['component'] == component and r.get('run', '') == run),
                                   key=lambda r: int(r['step']))
                     by_step = {int(r['step']): float(r[metric]) for r in data}
@@ -111,24 +142,29 @@ def main(argv=None):
                     if row_index == 0:
                         ax.set_ylabel(title.replace(' instances (fraction)', '\ninstances (fraction)'), fontsize=26, labelpad=20)
                     if col_index == 2:
-                        ax.set_xlabel('Training step', fontsize=22)
+                        ax.set_xlabel(axis_label, fontsize=22)
                 else:
                     if row_index == 0:
                         ax.set_title(title.replace(' instances (fraction)', ' instances\n(fraction)'), fontsize=26, pad=20)
                     if col_index == 0:
                         ax.set_ylabel(label, fontsize=26, labelpad=20)
                     if row_index == nrows - 1:
-                        ax.set_xlabel('Training step', fontsize=22)
+                        ax.set_xlabel(axis_label, fontsize=22)
                 ax.grid(alpha=.22)
                 ax.margins(x=.015, y=.1)
                 if not args.dynamic_ylim:
                     ax.set_ylim(0, 1)
                 ax.tick_params(labelsize=20, labelbottom=True)
         heading = 'Dense vs sparse ORM · All rewards' if comparison else grid.replace('_', ' ').title()
+        if comparison and len(runs) > 2:
+            heading = 'ORM run comparison · All rewards'
         subtitle = ' · common dense overall reward' if comparison else ''
+        if skip_first:
+            subtitle += ' · selected warmup excluded'
         fig.suptitle(f'{heading} · {alignment.title()} {window}-step averages{subtitle}', fontsize=30, y=.99)
         handles = [Line2D([0], [0], color=colors[run], lw=2.2,
-                          label=run or f'{alignment.title()} {window}-step average') for run in runs]
+                          label=(run + ' (mean only)' if run in summary.get('mean_only_runs', []) else run)
+                          or f'{alignment.title()} {window}-step average') for run in runs]
         if not args.smooth_only:
             handles.append(Line2D([0], [0], color='gray', lw=1, alpha=.3, label='Per training step'))
         fig.legend(handles=handles, loc='upper center', ncol=len(handles), frameon=False,
@@ -142,12 +178,23 @@ def main(argv=None):
             suffix += '_smooth_only'
         if args.dynamic_ylim:
             suffix += '_dynamic_ylim'
-        path = args.input_dir / ('overlapping_reward_grid.png' if comparison else f'{grid}_grid{suffix}.png')
+        path = output_dir / ('overlapping_reward_grid.png' if comparison else f'{grid}_grid{suffix}.png')
         fig.savefig(path, dpi=180, bbox_inches='tight', pad_inches=.25)
         if comparison:
             fig.savefig(path.with_suffix('.pdf'), bbox_inches='tight', pad_inches=.25)
         plt.close(fig)
         print(path)
+    if skip_first or args.output_dir:
+        (output_dir/'plot_options.json').write_text(json.dumps({
+            'source_metrics': str((args.input_dir/'metrics.csv').resolve()),
+            'skip_first_steps': skip_first,
+            'rebase_skipped_steps': args.rebase_skipped_steps,
+            'window': window, 'alignment': alignment,
+            'plotted_step_ranges': {run: [min(int(r['step']) for r in rows if r.get('run', '') == run),
+                                          max(int(r['step']) for r in rows if r.get('run', '') == run)]
+                                    for run in original_runs},
+            'smoothing': 'Computed after excluding warmup; excluded steps never enter running averages',
+        }, indent=2)+'\n')
 
 
 if __name__ == '__main__':

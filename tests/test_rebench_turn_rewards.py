@@ -336,16 +336,16 @@ def evaluate_scores(env, scores):
 
 
 @pytest.mark.parametrize('scores,expected', [
-    ([(.4, .8), (.1, .3), (.4, .8), (.2, .3)], [.62, 0, 0, -.38]),
-    ([(.4, .8), (.1, .3), (.1, .3)], [.62, 0, -.395]),
+    ([(.4, .8), (.1, .3), (.4, .8), (.2, .3)], [.68, 0, 0, -.41]),
+    ([(.4, .8), (.1, .3), (.1, .3)], [.68, 0, -.44]),
     ([(0, -.1)], [-.07]),
-    ([(.4, .8), (0, 0)], [.62, -.62]),
+    ([(.4, .8), (0, 0)], [.68, -.68]),
 ])
 def test_per_step_settlement(monkeypatch, scores, expected):
     env = turn_env(monkeypatch)
     result = evaluate_scores(env, scores)
     assert [reward for reward, _ in result] == pytest.approx(expected)
-    assert sum(reward for reward, _ in result) == pytest.approx(.15 * scores[-1][0] + .70 * scores[-1][1])
+    assert sum(reward for reward, _ in result) == pytest.approx(.30 * scores[-1][0] + .70 * scores[-1][1])
 
 
 def test_no_hook_inherits_previous_state_and_format_penalties_are_per_category(monkeypatch):
@@ -391,13 +391,13 @@ def test_runtime_error_without_capture_allows_later_recovery(monkeypatch):
         misc={'action_misc': {'completion_id': 'recovered'}},
     )
     reward, info = asyncio.run(env.evaluate())
-    assert reward == pytest.approx(.62)
+    assert reward == pytest.approx(.68)
     assert info['patch_hash'] == 'edited' and env.turn_reward_error is None
 
 
 @pytest.mark.parametrize('gamma,gae_lambda,expected', [
-    (1.0, 1.0, [.03, -.03, -.03]),
-    (.99, .9, [.03618357, -.02673, -.03]),
+    (1.0, 1.0, [.06, -.06, -.06]),
+    (.99, .9, [.07236714, -.05346, -.06]),
 ])
 def test_final_settlement_reaches_earlier_turns_through_ppo_gae(monkeypatch, gamma, gae_lambda, expected):
     import tinker
@@ -425,4 +425,4 @@ def test_final_settlement_reaches_earlier_turns_through_ppo_gae(monkeypatch, gam
     prepared, _ = prepare_batch(result.datums, predictions, 'none', value_granularity='turn',
                               gamma=gamma, gae_lambda=gae_lambda)
     for datum, advantage in zip(prepared, expected, strict=True):
-        assert datum.loss_fn_inputs['advantages'].to_torch()[-1].item() == pytest.approx(advantage)
+        assert datum.advantages[-1].item() == pytest.approx(advantage)
