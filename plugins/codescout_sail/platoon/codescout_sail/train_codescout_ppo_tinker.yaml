@@ -36,14 +36,15 @@ train:
     advantage_normalization: batch
     actor_epochs: 1
     critic_epochs: 1
-    # One batch, one epoch, one minibatch = exactly one critic-only update.
+    # One critic-only trainer batch: four minibatch updates, no actor update.
     critic_warmup_batches: 1
     critic:
       value_clip: 0.2
-      num_minibatches: 1
+      # Split prepared datums into four minibatches; keep the remainder in the last.
+      num_minibatches: 4
       num_microbatches: 1
       optimizer:
-        learning_rate: 1.0e-5
+        learning_rate: 5.0e-6
         beta1: 0.9
         beta2: 0.98
         eps: 1.0e-8
@@ -74,7 +75,7 @@ checkpoint:
 
 log_path: /data/user_data/adityabs/miles_sail
 # Export TINKER_BASE_URL and TINKER_API_KEY for the critic-enabled service,
-# or pass --tinker_base_url explicitly. Do not reuse the reference CISPO state.
+# or pass --tinker_base_url explicitly. Start a fresh run for this comparison.
 tinker_base_url: null
 
 inference_tunnel:
@@ -87,7 +88,7 @@ inference_tunnel:
 
 stats:
   experiment_name: codescout-platoon-tinker
-  trial_name: qwen3_4b_ppo_sail_b256_g1
+  trial_name: qwen3_4b_ppo_sail_b256_g1_k4
   wandb:
     mode: online
     project: codescout-platoon-tinker

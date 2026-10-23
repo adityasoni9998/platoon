@@ -34,6 +34,7 @@ class WorkflowConfig:
 @dataclass
 class CriticConfig:
     value_clip: float = 0.2
+    # Split prepared datums into up to K nonempty minibatches per critic epoch.
     num_minibatches: int = 1
     num_microbatches: int = 1
     optimizer: AdamParams = field(default_factory=lambda: AdamParams(learning_rate=1e-5, grad_clip_norm=1.0))
@@ -108,14 +109,10 @@ class TrainConfig:
             raise ValueError("ppo.gamma and ppo.gae_lambda must be between 0 and 1")
         if self.ppo.value_granularity not in ("token", "turn") or self.ppo.reward_mode not in ("terminal", "turn"):
             raise ValueError("PPO requires value_granularity=token or turn and reward_mode=terminal or turn")
-        if not (
-            self.num_minibatches
-            == self.num_microbatches
-            == self.ppo.critic.num_minibatches
-            == self.ppo.critic.num_microbatches
-            == 1
-        ):
-            raise ValueError("Initial PPO requires num_minibatches=num_microbatches=1 for both actor and critic")
+        if not (self.num_minibatches == self.num_microbatches == self.ppo.critic.num_microbatches == 1):
+            raise ValueError("PPO requires one actor minibatch and one microbatch for both actor and critic")
+        if self.ppo.critic.num_minibatches < 1:
+            raise ValueError("ppo.critic.num_minibatches must be positive")
         if self.ppo.advantage_normalization not in ("batch", "none"):
             raise ValueError("ppo.advantage_normalization must be batch or none")
         if self.ppo.advantage_normalization_granularity not in (None, "token", "turn"):

@@ -2,6 +2,14 @@
 
 ## CodeScout reward comparison
 
+With no run paths, compare the two older CodeScout runs (BS32/GS8 and BS256/GS1)
+against the new BS256/GS1 runs with K=4 (critic LR=5e-6) and K=8
+(critic LR=3.54e-6):
+
+```bash
+uv run scripts/reward_plots/compare_codescout_rewards.py
+```
+
 Overlay runs using the final rewards recorded in their event JSONL logs:
 
 ```bash

@@ -289,15 +289,21 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
     if shared_state.train_step >= config.ppo.critic_warmup_batches:
         roles.append(("policy", actor, config.ppo.actor_epochs, config.optimizer, config.loss_fn_config))
     for role, client, epochs, optimizer, loss_config in roles:
-        start = time.perf_counter()
-        inputs = loss_datums(prepared, role)
-        metric_inputs = _actor_metric_datums(prepared) if role == "policy" else []
-        tracker.scalar(**{f"timing/{role}_prepare_inputs": time.perf_counter() - start})
+        num_minibatches = min(config.ppo.critic.num_minibatches, len(prepared)) if role == "critic" else 1
+        size = len(prepared) // num_minibatches
+        minibatches = [prepared[i * size : (i + 1) * size] for i in range(num_minibatches - 1)]
+        minibatches.append(prepared[(num_minibatches - 1) * size :])  # Keep all remaining datums in the last minibatch.
         loss_fn = "ppo" if role == "critic" else config.loss_fn
         timings = dict(
             forward_backward_submit=0.0, forward_backward_wait=0.0, optim_step_submit=0.0, optim_step_wait=0.0
         )
-        for _ in range(epochs):
+        prepare_inputs_total = 0.0
+        for minibatch in minibatches * epochs:
+            start = time.perf_counter()
+            # Normalize over this minibatch; targets and old values remain frozen.
+            inputs = loss_datums(minibatch, role)
+            metric_inputs = _actor_metric_datums(minibatch) if role == "policy" else []
+            prepare_inputs_total += time.perf_counter() - start
             start = time.perf_counter()
             backward_future = await client.forward_backward_async(inputs, loss_fn=loss_fn, loss_fn_config=loss_config)
             timings["forward_backward_submit"] += time.perf_counter() - start
@@ -313,7 +319,7 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
             if role == "critic":
                 deltas = [
                     (output["values"].to_numpy() - datum.old_values)[datum.critic_mask]
-                    for datum, output in zip(prepared, result.loss_fn_outputs, strict=True)
+                    for datum, output in zip(minibatch, result.loss_fn_outputs, strict=True)
                 ]
                 tracker.scalar(
                     **{
@@ -336,7 +342,8 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
             prefix = "critic" if role == "critic" else "optim"
             for key, value in metrics.items():
                 tracker.scalar(**{f"{prefix}/{key}": value})
-        # Sum repeated optimization epochs before logging; scalar() averages repeated calls.
+        # Sum minibatches and epochs before logging; scalar() averages repeated calls.
+        tracker.scalar(**{f"timing/{role}_prepare_inputs": prepare_inputs_total})
         timings["forward_backward_total"] = timings["forward_backward_submit"] + timings["forward_backward_wait"]
         timings["optim_step_total"] = timings["optim_step_submit"] + timings["optim_step_wait"]
         tracker.scalar(**{f"timing/{role}_{key}": value for key, value in timings.items()})

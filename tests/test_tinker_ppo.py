@@ -15,6 +15,7 @@ from datasets import Dataset
 from tinker import TensorData
 
 from platoon.train.tinker.config_defs import (
+    CriticConfig,
     EvalConfig,
     PlatoonTinkerRLTrainerConfig,
     PPOConfig,
@@ -199,6 +200,32 @@ def test_grpo_defaults_unchanged():
     assert train.algorithm == train.workflow_config.algorithm == "grpo"
     assert train.loss_fn == "cispo"
     assert train.workflow_config.filter_zero_variance_groups
+
+
+@pytest.mark.parametrize("count", [0, -1])
+def test_critic_minibatch_count_must_be_positive(count):
+    with pytest.raises(ValueError, match="num_minibatches must be positive"):
+        config(ppo=PPOConfig(critic=CriticConfig(num_minibatches=count)))
+
+
+def test_critic_minibatches_load_from_yaml(tmp_path):
+    from platoon.utils.config import load_config
+
+    path = tmp_path / "ppo.yaml"
+    path.write_text("""train:
+  model_name: test
+  renderer_name: test
+  algorithm: ppo
+  lora_rank: 0
+  loss_fn: ppo
+  ppo:
+    critic:
+      num_minibatches: 4
+eval: {}
+log_path: unused
+""")
+    cfg, _ = load_config(["--config", str(path)], PlatoonTinkerRLTrainerConfig)
+    assert cfg.train.ppo.critic.num_minibatches == 4
 
 
 @pytest.mark.asyncio
@@ -459,6 +486,59 @@ async def test_update_batch_uses_token_whitening_with_turn_critic(tmp_path):
     actual = torch.cat([d.loss_fn_inputs["advantages"].to_torch() for d in actor.frozen[0]])
     torch.testing.assert_close(actual, expected)
     assert [sum(d.loss_fn_inputs["weights"].data) for d in critic.frozen[0]] == [0.5, 0.5]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,expected_sizes", [(1, [11]), (2, [5, 6]), (4, [2, 2, 2, 5]), (16, [1] * 11)])
+@pytest.mark.parametrize("warmup", [False, True])
+async def test_critic_minibatches_preserve_targets_and_actor_advantages(
+    tmp_path, monkeypatch, count, expected_sizes, warmup
+):
+    cfg = config(
+        ppo=PPOConfig(
+            value_granularity="turn",
+            critic_epochs=2,
+            critic_warmup_batches=int(warmup),
+            critic=CriticConfig(num_minibatches=count),
+        )
+    )
+    actor, critic, bus = clients()
+    rows = [datum(float(i)) for i in range(11)]
+    outputs = [{"values": tensor(critic.predictions(row).detach().tolist())} for row in rows]
+    prepared, _ = prepare_batch(rows, outputs, "batch", value_granularity="turn")
+    forward_calls = 0
+    original_forward = critic.forward_async
+
+    async def forward_once(*args, **kwargs):
+        nonlocal forward_calls
+        forward_calls += 1
+        return await original_forward(*args, **kwargs)
+
+    monkeypatch.setattr(critic, "forward_async", forward_once)
+    shared = SimpleNamespace(
+        training_client=actor, critic_client=critic, train_tracker=StatsTracker("test"), train_step=0, watchdog=None
+    )
+    await update_batch(make_trainer(tmp_path, cfg), shared, rows)
+    actual_count = min(count, len(rows))
+    assert forward_calls == 1
+    assert critic.steps == 2 * actual_count
+    assert actor.steps == int(not warmup)
+    assert [e[1] for e in bus["events"] if e[0] == "step"] == (
+        ["critic"] * (2 * actual_count) + (["policy"] if not warmup else [])
+    )
+    sizes = [len(batch) for batch in critic.frozen[:actual_count]]
+    assert sizes == expected_sizes
+    for batch in critic.frozen:
+        assert sum(sum(d.loss_fn_inputs["weights"].data) for d in batch) == pytest.approx(1)
+    expected = loss_datums(prepared, "critic")
+    for epoch in range(2):
+        flat = [d for batch in critic.frozen[epoch * actual_count : (epoch + 1) * actual_count] for d in batch]
+        for actual, original in zip(flat, expected, strict=True):
+            for key in ("values", "returns"):
+                assert actual.loss_fn_inputs[key].data == original.loss_fn_inputs[key].data
+    assert critic.weight.item() != pytest.approx(0.2)
+    if not warmup:
+        assert actor.frozen[0] == loss_datums(prepared, "policy")
 
 
 @pytest.mark.asyncio

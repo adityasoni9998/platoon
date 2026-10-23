@@ -18,6 +18,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 
+RUN_ROOT = Path("/data/user_data/adityabs/miles_sail/codescout-platoon-tinker")
+DEFAULT_RUNS = [
+    ("codescout-sail-ppo-20261015-203723", "BS32, GS8, K=1, critic LR=1e-5"),
+    ("codescout-sail-ppo-b256-g1-20261016-223443", "BS256, GS1, K=1, critic LR=1e-5"),
+    ("codescout-sail-ppo-b256-g1-k4-20261022-222813", "BS256, GS1, K=4, critic LR=5e-6"),
+    ("codescout-sail-ppo-b256-g1-k8-20261022-233113", "BS256, GS1, K=8, critic LR=3.54e-6"),
+]
+
 
 def read_rollout(path):
     roots = set()
@@ -109,7 +117,8 @@ def collect_run(path, label, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("runs", nargs="+", type=Path, help="Run roots or rollouts/train directories")
+    parser.add_argument("runs", nargs="*", type=Path,
+                        help="Run roots or rollouts/train directories; defaults to the four CodeScout comparison runs")
     parser.add_argument("--labels", nargs="+")
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--skip-last-steps", type=int, default=2)
@@ -117,6 +126,10 @@ def main():
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/codescout_reward_comparison"))
     args = parser.parse_args()
+    if not args.runs:
+        args.runs = [RUN_ROOT / name for name, _ in DEFAULT_RUNS]
+        if args.labels is None:
+            args.labels = [label for _, label in DEFAULT_RUNS]
     if args.window < 1 or args.workers < 1 or args.skip_last_steps < 0:
         parser.error("window/workers must be positive; skip-last-steps must be nonnegative")
     labels = args.labels or [p.resolve().name for p in args.runs]
@@ -161,7 +174,8 @@ def main():
                "max_step": args.max_step, "runs": summaries,
                "reward_source": "trajectory_finished.reward; no substituted or recomputed rewards",
                "population": "Finished root trajectories with finite rewards, including zero/error rewards",
-               "smoothing": "Equal-weight means over policy versions in [step-window+1, step]; available values at edges",
+               "smoothing": "Equal-weight means over policy versions in [step-window+1, step]; "
+                            "available values at edges",
                "x_axis": "Sampling policy version, not optimizer consumption step"}
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Saved PNG, PDF, CSV, and exclusion counts to {args.output_dir.resolve()}")
