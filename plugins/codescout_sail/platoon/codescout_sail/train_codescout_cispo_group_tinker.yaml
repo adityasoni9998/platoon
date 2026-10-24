@@ -1,0 +1,73 @@
+# CodeScout CISPO with group-centered outcome advantages: 32 tasks x 8 rollouts.
+# Match the CISPO + critic actor optimizer; train for 80 actor updates.
+# No critic or critic warmup; up to 256 concurrent rollouts.
+train:
+  algorithm: grpo
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 42048
+  lora_rank: 0
+  batch_size: 32
+  num_epochs: null
+  max_training_steps: 80
+  num_minibatches: 1
+  num_microbatches: 1
+  num_concurrent_rollout_workflow_workers: 32
+  # Permit rollouts up to one published policy version behind.
+  max_staleness: 1
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  # Actor Adam settings match train_codescout_fft_tinker.yaml.
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 6
+      # The trainer derives the final rollout directory from log_path and stats.
+      output_dir: /data/user_data/adityabs/miles_sail/rollouts
+      verbose: true
+      timeout: 600
+      inference_params:
+        temperature: 1.0
+        top_p: 1.0
+        max_completion_tokens: 2048
+
+eval:
+  strategy: none
+checkpoint:
+  strategy: step
+  every: 500
+  load_checkpoint_path: null
+
+log_path: /data/user_data/adityabs/miles_sail
+# Export TINKER_BASE_URL and TINKER_API_KEY for the full-parameter service,
+# or pass --tinker_base_url explicitly. Start a fresh run for this comparison.
+tinker_base_url: null
+
+inference_tunnel:
+  backend: modal
+  modal:
+    app_name: codescout-sail-inference-router
+    cpu: 0.125
+    memory: 128
+    timeout: 86400
+
+stats:
+  experiment_name: codescout-platoon-tinker
+  trial_name: qwen3_4b_cispo_group_sail_b32_g8
+  wandb:
+    mode: online
+    project: codescout-platoon-tinker
+    entity: 9998_team
+    tags: [codescout, sail, tinker, qwen3-4b-instruct, cispo, group-advantages, full-finetune]

@@ -20,11 +20,18 @@ from matplotlib.ticker import MaxNLocator
 
 RUN_ROOT = Path("/data/user_data/adityabs/miles_sail/codescout-platoon-tinker")
 DEFAULT_RUNS = [
-    ("codescout-sail-ppo-20261015-203723", "BS32, GS8, K=1, critic LR=1e-5"),
-    ("codescout-sail-ppo-b256-g1-20261016-223443", "BS256, GS1, K=1, critic LR=1e-5"),
-    ("codescout-sail-ppo-b256-g1-k4-20261022-222813", "BS256, GS1, K=4, critic LR=5e-6"),
-    ("codescout-sail-ppo-b256-g1-k8-20261022-233113", "BS256, GS1, K=8, critic LR=3.54e-6"),
+    ("codescout-sail-ppo-20261015-203723", "PPO · BS32, GS8, K=1, critic LR=1e-5"),
+    ("codescout-sail-ppo-b256-g1-20261016-223443", "PPO · BS256, GS1, K=1, critic LR=1e-5"),
+    ("codescout-sail-ppo-b256-g1-k4-20261022-222813", "PPO · BS256, GS1, K=4, critic LR=5e-6"),
+    ("codescout-sail-ppo-b256-g1-k8-20261022-233113", "PPO · BS256, GS1, K=8, critic LR=3.54e-6"),
+    ("codescout-sail-cispo-b32-g8-20261024-124001", "CISPO group · BS32, GS8"),
+    ("codescout-sail-cispo-critic-b256-g1-k4-20261024-124518", "CISPO + critic · BS256, GS1, K=4, critic LR=5e-6"),
 ]
+# Keep each run's colour consistent with compare_critic_ev.py, including subsets.
+RUN_COLORS = dict(zip(
+    (name for name, _ in DEFAULT_RUNS),
+    ["#1f77b4", "#ff7f0e", "#d62728", "#17becf", "#9467bd", "#2ca02c"],
+))
 
 
 def read_rollout(path):
@@ -68,9 +75,6 @@ def collect_run(path, label, args):
     if not folders:
         raise ValueError(f"{label}: no rollout policy-version directories found in {source}; "
                          "wait for the run to write rollout JSONL logs")
-    if len(folders) <= args.skip_last_steps:
-        raise ValueError(f"{label}: not enough version directories to skip {args.skip_last_steps}; "
-                         "use --skip-last-steps 0 for a very new run")
     skipped = folders[-args.skip_last_steps:] if args.skip_last_steps else []
     retained = folders[:-args.skip_last_steps] if args.skip_last_steps else folders
     if args.max_step is not None:
@@ -103,25 +107,24 @@ def collect_run(path, label, args):
             rows.append({"run": label, "policy_version": step, "rollouts": len(rewards),
                          "error_endings_included": errors, "mean_reward": mean,
                          "trailing_mean_reward": fmean(valid) if valid else None})
-    if not seen:
+    if not seen and retained:
         raise ValueError(f"{label}: no finished root trajectories with finite rewards remain")
     summary = {"label": label, "source": str(source), "rollouts_plotted": len(seen),
                "excluded_policy_versions": [int(p.name) for p in skipped],
                "files_in_skipped_versions_at_scan": skipped_counts,
-               "first_policy_version": rows[0]["policy_version"],
-               "last_policy_version": rows[-1]["policy_version"], "audit": dict(audit)}
-    print(f"{label}: {len(seen)} rollouts, versions {rows[0]['policy_version']}–"
-          f"{rows[-1]['policy_version']}; skipped {[int(p.name) for p in skipped]}", flush=True)
+               "first_policy_version": rows[0]["policy_version"] if rows else None,
+               "last_policy_version": rows[-1]["policy_version"] if rows else None, "audit": dict(audit)}
+    print(f"{label}: {len(seen)} rollouts; skipped {[int(p.name) for p in skipped]}", flush=True)
     return rows, summary
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", nargs="*", type=Path,
-                        help="Run roots or rollouts/train directories; defaults to the four CodeScout comparison runs")
+                        help="Run roots or rollouts/train directories; defaults to six CodeScout comparison runs")
     parser.add_argument("--labels", nargs="+")
     parser.add_argument("--window", type=int, default=16)
-    parser.add_argument("--skip-last-steps", type=int, default=2)
+    parser.add_argument("--skip-last-steps", type=int, default=1)
     parser.add_argument("--max-step", type=int, help="Maximum policy version, applied after skipping newest versions")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/codescout_reward_comparison"))
@@ -147,27 +150,30 @@ def main():
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(11, 5.5), layout="constrained")
-    for label in labels:
+    for path, label in zip(args.runs, labels):
+        source = path.resolve()
+        run_name = source.parent.parent.name if source.name == "train" else source.name
+        color = RUN_COLORS.get(run_name) or ax._get_lines.get_next_color()
         data = {row["policy_version"]: row for row in rows if row["run"] == label}
+        if not data:
+            ax.plot([], [], color=color, label=f"{label} (awaiting retained versions)")
+            continue
         # Missing versions break plotted lines; they are never filled with zero.
         steps = list(range(min(data), max(data) + 1))
-        raw = [data.get(s, {}).get("mean_reward") for s in steps]
         smooth = [data.get(s, {}).get("trailing_mean_reward") for s in steps]
-        color = ax._get_lines.get_next_color()
-        ax.plot(steps, [math.nan if v is None else v for v in raw],
-                color=color, alpha=0.3, linewidth=1, marker=".")
         ax.plot(steps, [math.nan if v is None else v for v in smooth],
                 color=color, linewidth=2.3, marker=".", label=label)
     ax.set(title=f"CodeScout reward comparison · trailing {args.window}-step averages",
            xlabel="Sampling policy version (step)", ylabel="Mean final rollout reward")
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.grid(alpha=0.2)
-    ax.legend(title="Faint lines: unsmoothed means")
+    ax.legend()
     for suffix in ("png", "pdf"):
         fig.savefig(args.output_dir / f"reward_comparison.{suffix}", dpi=180)
     plt.close(fig)
     with (args.output_dir / "rewards.csv").open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(stream, fieldnames=["run", "policy_version", "rollouts",
+                                "error_endings_included", "mean_reward", "trailing_mean_reward"])
         writer.writeheader()
         writer.writerows(rows)
     summary = {"window": args.window, "skip_last_steps": args.skip_last_steps,
