@@ -1,5 +1,7 @@
 # CodeScout CISPO actor with turn-level critic and terminal outcome rewards.
-# Retain the PPO K=4 baseline: 256x1, critic LR 5e-6, gamma=.99, lambda=.9.
+# Gamma/lambda ablation: gamma=1 and lambda=1 with turn-level values and advantages.
+# Retain the latest AdamW settings: beta2=.95 and weight_decay=.017 for both models.
+# Keep 256x1, K=4, actor LR 1e-6 and critic LR 5e-6.
 # 81 trainer batches = one critic-only warmup batch + 80 actor updates.
 # Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
 train:
@@ -20,21 +22,21 @@ train:
   loss_fn_config:
     clip_low_threshold: 0.0
     clip_high_threshold: 5.0
-  # Actor Adam settings match train_codescout_ppo_tinker.yaml.
+  # Match critic-free CISPO AdamW settings; preserve actor LR 1e-6.
   optimizer:
     learning_rate: 1.0e-6
     beta1: 0.9
-    beta2: 0.98
+    beta2: 0.95
     eps: 1.0e-8
-    weight_decay: 0.1
+    weight_decay: 0.017
     grad_clip_norm: 1.0
   ppo:
     value_granularity: turn
     # Preserve CodeScout's outcome reward: localization F1 + four-turn bonus.
     reward_mode: terminal
     advantage_normalization_granularity: turn
-    gamma: 0.99
-    gae_lambda: 0.9
+    gamma: 1.0
+    gae_lambda: 1.0
     advantage_normalization: batch
     actor_epochs: 1
     critic_epochs: 1
@@ -45,13 +47,13 @@ train:
       # Split prepared datums into four minibatches; keep the remainder in the last.
       num_minibatches: 4
       num_microbatches: 1
-      # Critic Adam settings match train_codescout_ppo_tinker.yaml.
+      # Match critic-free CISPO AdamW settings; preserve critic LR 5e-6.
       optimizer:
         learning_rate: 5.0e-6
         beta1: 0.9
-        beta2: 0.98
+        beta2: 0.95
         eps: 1.0e-8
-        weight_decay: 0.1
+        weight_decay: 0.017
         grad_clip_norm: 1.0
   workflow_config:
     group_size: 1

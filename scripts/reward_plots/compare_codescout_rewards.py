@@ -26,11 +26,13 @@ DEFAULT_RUNS = [
     ("codescout-sail-ppo-b256-g1-k8-20261022-233113", "PPO · BS256, GS1, K=8, critic LR=3.54e-6"),
     ("codescout-sail-cispo-b32-g8-20261024-124001", "CISPO group · BS32, GS8"),
     ("codescout-sail-cispo-critic-b256-g1-k4-20261024-124518", "CISPO + critic · BS256, GS1, K=4, critic LR=5e-6"),
+    ("codescout-sail-cispo-critic-adam-b256-g1-k4-20261025-132454", "CISPO + critic · BS256, GS1, K=4, critic LR=5e-6 · β₂=.95, WD=.017"),
+    ("codescout-sail-cispo-critic-adam-gamma1-lambda1-b256-g1-k4-20261025-165119", "CISPO + critic · BS256, GS1, K=4 · β₂=.95, WD=.017, γ=λ=1"),
 ]
 # Keep each run's colour consistent with compare_critic_ev.py, including subsets.
 RUN_COLORS = dict(zip(
     (name for name, _ in DEFAULT_RUNS),
-    ["#1f77b4", "#ff7f0e", "#d62728", "#17becf", "#9467bd", "#2ca02c"],
+    ["#1f77b4", "#ff7f0e", "#d62728", "#17becf", "#9467bd", "#2ca02c", "#8c564b", "#e377c2"],
 ))
 
 
@@ -121,7 +123,7 @@ def collect_run(path, label, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", nargs="*", type=Path,
-                        help="Run roots or rollouts/train directories; defaults to six CodeScout comparison runs")
+                        help="Run roots or rollouts/train directories; defaults to eight CodeScout comparison runs")
     parser.add_argument("--labels", nargs="+")
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--skip-last-steps", type=int, default=1)

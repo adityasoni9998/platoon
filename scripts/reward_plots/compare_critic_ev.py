@@ -18,6 +18,8 @@ RUNS = [
     ("CodeScout", "codescout-platoon-tinker", "ap4n7px7"),
     ("CodeScout", "codescout-platoon-tinker", "a221kfp1"),
     ("CodeScout", "codescout-platoon-tinker", "abzvwgct"),
+    ("CodeScout", "codescout-platoon-tinker", "70v8xbkq"),
+    ("CodeScout", "codescout-platoon-tinker", "kexcf96w"),
 ]
 GROUP_RUN = Path("/data/user_data/adityabs/miles_sail/codescout-platoon-tinker/"
                  "codescout-sail-cispo-b32-g8-20261024-124001")
@@ -164,13 +166,17 @@ def main():
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(11.5, 6), layout="constrained")
     rows, summaries = [], []
-    for run, color in zip(runs, ["#1f77b4", "#ff7f0e", "#d62728", "#17becf", "#9467bd", "#2ca02c"]):
+    for run, color in zip(runs, ["#1f77b4", "#ff7f0e", "#d62728", "#17becf", "#9467bd", "#2ca02c", "#8c564b", "#e377c2"]):
         group = run.get("estimator") == "group"
         algorithm = "CISPO group" if group else (
             "CISPO + critic" if run.get("actor_loss") == "cispo" else "PPO")
         label = f"{algorithm} · BS{run['batch_size']}, GS{run['group_size']}"
         if run.get("critic_minibatches", 1) != 1:
             label += f" · K={run['critic_minibatches']}, critic LR={run['critic_learning_rate']:g}"
+        if run["run_id"] == "70v8xbkq":
+            label += " · β₂=.95, WD=.017"
+        if run["run_id"] == "kexcf96w":
+            label = f"{algorithm} · BS{run['batch_size']}, GS{run['group_size']}, K={run['critic_minibatches']} · β₂=.95, WD=.017, γ=λ=1"
         known_steps = {int(h["train/step"]) for h in run["history"] if "train/step" in h}
         if group:
             # Include live versions with no completed groups yet, just like the reward plot.
@@ -243,7 +249,7 @@ def main():
                   skip_last_steps=args.skip_last_steps,
                   precision="Critic: unsampled W&B scan_history. Group: rollout JSONL.",
                   weighting="One observation per turn; trailing mean weights available x-axis points equally.",
-                  target="Critic: pre-update GAE lambda-return (gamma .99, lambda .9). "
+                  target="Critic: pre-update GAE lambda-return using each run's configured gamma and lambda. "
                          "Group: final ORM reward, with reward minus group mean as advantage.",
                   caveat="Group EV uses an in-group outcome baseline, not learned out-of-sample predictions; "
                          "its target and sampling-version aggregation differ from critic EV.",
