@@ -36,6 +36,7 @@ from platoon.utils.config import load_config
 from platoon.codescout_sail.rollout import run_rollout
 from platoon.codescout_sail.tasks import get_task, load_data
 from platoon.codescout_sail.tinker_workflow import TinkerProxyRollout
+from platoon.openhands.apptainer_namespace import shared_apptainer_namespace
 from platoon.inference.inference_tunnel import InferenceTunnelConfig, inference_tunnels, wait_for_health
 from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.tinker.fastapi_litellm_proxy import FastAPILiteLLMTinkerHTTPProxyServer
@@ -58,6 +59,12 @@ async def main(args: list[str]):
         config_class=CodeScoutTinkerConfig,
         default_config_path=str(default_config),
     )
+    workspace = config.train.workflow_config.rollout_config.extra.get("workspace", {})
+    with shared_apptainer_namespace(enabled=workspace.get("type") == "apptainer"):
+        await train(config)
+
+
+async def train(config):
     train_datamap, _ = load_data()
     train_dataset = Dataset.from_list([{"task_id": x} for x in train_datamap.keys()])
     # Create trainer and run with context manager for proper cleanup
@@ -76,6 +83,7 @@ async def main(args: list[str]):
             context_window_length=trainer.model_info.llm.context_window_length,
             host=os.environ.get("CODESCOUT_TINKER_PROXY_HOST", "127.0.0.1"),
         )
+        rollout_adapter = TinkerProxyRollout(run_rollout, tinker_proxy)
         try:
             tinker_proxy.start()
             origin = tinker_proxy.base_url.removesuffix("/v1")
@@ -86,7 +94,7 @@ async def main(args: list[str]):
                 trainer.model_info.api_key = tinker_proxy.api_key
                 # Create workflows - use trainer.run_log_path for run-specific output
                 train_workflow = GroupRolloutWorkflow(
-                    rollout_fn=TinkerProxyRollout(run_rollout, tinker_proxy),
+                    rollout_fn=rollout_adapter,
                     get_task_fn=get_task,
                     config=config.train.workflow_config,
                     model_info=trainer.model_info,
@@ -100,10 +108,13 @@ async def main(args: list[str]):
                     eval_workflow=None,
                 )
         finally:
-            trainer.model_info.model_name = old_model_name
-            trainer.model_info.base_url = old_base_url
-            trainer.model_info.api_key = old_api_key
-            tinker_proxy.stop()
+            try:
+                await rollout_adapter.aclose()
+            finally:
+                trainer.model_info.model_name = old_model_name
+                trainer.model_info.base_url = old_base_url
+                trainer.model_info.api_key = old_api_key
+                tinker_proxy.stop()
 
 
 if __name__ == "__main__":

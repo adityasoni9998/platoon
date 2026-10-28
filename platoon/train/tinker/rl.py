@@ -558,6 +558,8 @@ class PlatoonTinkerRLTrainer:
             tasks_per_microbatch = tasks_per_minibatch // self.config.train.num_microbatches
 
             total_datums = 0
+            remaining_extra_groups = self.config.train.extra_rollout_groups
+            accepted_groups = 0
 
             # We perform num_minibatches weight updates per batch.
             for minibatch_num in range(self.config.train.num_minibatches):
@@ -574,7 +576,8 @@ class PlatoonTinkerRLTrainer:
                 for microbatch_num in range(self.config.train.num_microbatches):
                     task_rollout_results: list[tinker.Datum] = []
 
-                    for task_num in range(tasks_per_microbatch):
+                    task_num = 0
+                    while task_num < tasks_per_microbatch:
                         queue_wait_start = time.perf_counter()
                         logger.debug(
                             f"Waiting for rollout {task_num + 1}/{tasks_per_microbatch} "
@@ -586,7 +589,7 @@ class PlatoonTinkerRLTrainer:
                         if queue_wait_elapsed > 60.0:
                             logger.warning(f"Waited {queue_wait_elapsed:.1f}s for rollout from queue (slow)")
 
-                        # Filter out stale rollouts. TODO: Consider requeuing.
+                        # Filter out stale groups before counting them toward the batch.
                         if self.config.train.max_staleness is not None and rollout is not None and len(rollout) > 0:
                             # Extract checkpoint_version from loss_fn_inputs (stored as a 1-element tensor)
                             checkpoint_version_tensor = rollout[0].loss_fn_inputs.get("checkpoint_version")
@@ -602,9 +605,16 @@ class PlatoonTinkerRLTrainer:
                                 shared_state.train_tracker.scalar(stale_rollouts=1.0)
                                 rollout = None
 
-                        if rollout is not None:
+                        # Spend at most K extra queue reads across the whole batch to replace
+                        # failed, empty or stale groups. With K=0, retain the original behavior.
+                        if not rollout and remaining_extra_groups > 0:
+                            remaining_extra_groups -= 1
+                            continue
+                        task_num += 1
+                        if rollout:
                             task_rollout_results.extend(rollout)
                             total_datums += len(rollout)
+                            accepted_groups += 1
 
                     if len(task_rollout_results) == 0:
                         logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
@@ -793,6 +803,15 @@ class PlatoonTinkerRLTrainer:
                         shared_state.train_tracker.scalar(**{f"optim/{key}": value})
 
             shared_state.train_tracker.scalar(total_datums_per_batch=total_datums)
+            if self.config.train.extra_rollout_groups:
+                shared_state.train_tracker.scalar(accepted_rollout_groups=accepted_groups)
+                if accepted_groups < self.config.train.batch_size:
+                    logger.warning(
+                        "Extra rollout allowance exhausted: using %d/%d eligible groups in batch %d",
+                        accepted_groups,
+                        self.config.train.batch_size,
+                        shared_state.train_step,
+                    )
 
             # Update sampling client with timing
             update_start = time.perf_counter()
@@ -1187,7 +1206,9 @@ class PlatoonTinkerRLTrainer:
             grad_clip_norm=self.config.train.optimizer.grad_clip_norm,
         )
 
-        train_dataloader = PlatoonTinkerDataloader(self.train_dataset, self.config.train.batch_size)
+        train_dataloader = PlatoonTinkerDataloader(
+            self.train_dataset, self.config.train.batch_size + self.config.train.extra_rollout_groups
+        )
         eval_dataloader = None
         if self.eval_dataset is not None:
             eval_dataloader = PlatoonTinkerDataloader(

@@ -13,6 +13,7 @@ os.environ["MODAL_SANDBOX_V2"] = "1"
 from jinja2 import Environment, FileSystemLoader
 from openhands.sdk import LLM, Agent, get_logger
 from openhands.sdk.hooks import HookConfig
+from openhands.sdk.workspace import BaseWorkspace
 from openhands.tools import get_default_tools
 from openhands.workspace import ModalWorkspace
 from platoon.config_defs import RolloutConfig
@@ -24,13 +25,14 @@ from platoon.openhands.agent import OpenHandsAgent
 from platoon.visualization.event_sinks import JsonlFileSink
 
 from platoon.issue_resolution.env import SWERebenchEnv
-from platoon.issue_resolution.turn_snapshots import install_capture_hook
 from platoon.issue_resolution.tasks import (
     NUM_RETRIES_SANDBOX_START,
     SDK_SHORT_SHA,
     USER_PROMPT_FILENAME,
     named_agent_server_image_for_instance,
 )
+from platoon.issue_resolution.turn_snapshots import install_capture_hook
+from platoon.issue_resolution.workspace import WorkspaceConfig
 
 logger = get_logger(__name__)
 
@@ -69,17 +71,23 @@ def _modal_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWor
 
 def prepare_workspace(
     instance: dict, *, rollout_timeout: int = 1800, turn_rewards: bool = False,
-) -> tuple[ModalWorkspace, HookConfig | None]:
-    """Start a Modal workspace and validate its prebuilt SWE-rebench testbed."""
+    workspace_config: dict | None = None,
+) -> tuple[BaseWorkspace, HookConfig | None]:
+    """Start the configured workspace and validate its prebuilt SWE-rebench testbed."""
+    config = WorkspaceConfig.model_validate(workspace_config or {})
     instance_id = str(instance["instance_id"])
     repo_path = "/testbed"
     quoted_repo_path = shlex.quote(repo_path)
 
     last_error: Exception | None = None
     for attempt in range(1, NUM_RETRIES_SANDBOX_START + 1):
-        workspace: ModalWorkspace | None = None
+        workspace: BaseWorkspace | None = None
         try:
-            workspace = _modal_workspace(instance, rollout_timeout=rollout_timeout)
+            if config.type == "apptainer":
+                assert config.apptainer is not None
+                workspace = config.apptainer.create_workspace(instance)
+            else:
+                workspace = _modal_workspace(instance, rollout_timeout=rollout_timeout)
             clean = workspace.execute_command(
                 f"cd {quoted_repo_path} && "
                 "git config --global --add safe.directory /testbed && "
@@ -92,7 +100,8 @@ def prepare_workspace(
             instance["repo_path"] = repo_path
             hook_config = install_capture_hook(workspace, instance) if turn_rewards else None
             logger.info(
-                "Modal workspace for %s is ready at %s using SDK image %s",
+                "%s workspace for %s is ready at %s using SDK image %s",
+                config.type,
                 instance_id,
                 repo_path,
                 SDK_SHORT_SHA,
@@ -104,14 +113,17 @@ def prepare_workspace(
                 workspace.cleanup()
             if attempt < NUM_RETRIES_SANDBOX_START:
                 logger.warning(
-                    "Modal workspace setup attempt %s/%s failed for %s: %s",
+                    "%s workspace setup attempt %s/%s failed for %s: %s",
+                    config.type,
                     attempt,
                     NUM_RETRIES_SANDBOX_START,
                     instance_id,
                     error,
                 )
 
-    raise RuntimeError(f"Error preparing Modal workspace for instance {instance_id}: {last_error}")
+    raise RuntimeError(
+        f"Error preparing {config.type} workspace for instance {instance_id}: {last_error}"
+    )
 
 
 def get_instruction(instance: dict, prompt_path: str) -> str:
@@ -157,8 +169,7 @@ def prepare_agent(llm: LLM) -> Agent:
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
     env: SWERebenchEnv | None = None
-    workspace: ModalWorkspace | None = None
-    cleanup_done = False
+    workspace: BaseWorkspace | None = None
     rollout_start = time.perf_counter()
     rollout_timeout = config.timeout or 1800
     episode_timeout = rollout_timeout + 480
@@ -173,10 +184,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
     collection_id: str | None = None
 
     async def run_cleanup() -> None:
-        nonlocal cleanup_done, cleanup_total_s
-        if cleanup_done:
-            return
-        cleanup_done = True
+        nonlocal cleanup_total_s
         cleanup_start = time.perf_counter()
         try:
             if env is not None:
@@ -188,7 +196,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
                 try:
                     await asyncio.to_thread(workspace.cleanup)
                 except (asyncio.CancelledError, Exception) as error:
-                    logger.warning("Modal cleanup failed for task %s: %s", task.id, error)
+                    logger.warning("Workspace cleanup failed for task %s: %s", task.id, error)
             cleanup_total_s += time.perf_counter() - cleanup_start
 
     try:
@@ -203,6 +211,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             workspace, hook_config = await asyncio.to_thread(
                 prepare_workspace, instance, rollout_timeout=rollout_timeout,
                 turn_rewards=config.extra.get("turn_rewards", False),
+                workspace_config=config.extra.get("workspace"),
             )
             prepare_workspace_s = time.perf_counter() - prepare_workspace_start
         except Exception as error:
@@ -253,7 +262,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         # reset() waits for the run and freezes its events before act()/step().
         # OpenHands enforces task.max_steps; consume the full history here.
         episode_task = asyncio.create_task(
-            run_episode(OpenHandsAgent(), env, timeout=config.step_timeout, enforce_step_budget=False)
+            run_episode(
+                OpenHandsAgent(), env, timeout=config.step_timeout, enforce_step_budget=False,
+            )
         )
         agent_loop_start = time.perf_counter()
         try:
@@ -264,7 +275,9 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
         except asyncio.TimeoutError as error:
             agent_loop_s = time.perf_counter() - agent_loop_start
             status = "timeout"
-            error_detail = str(error) or f"Rollout and evaluation timed out after {episode_timeout} seconds"
+            error_detail = (
+                str(error) or f"Rollout and evaluation timed out after {episode_timeout} seconds"
+            )
             raise
         except Exception as error:
             agent_loop_s = time.perf_counter() - agent_loop_start
@@ -285,7 +298,6 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             error_detail = str(error)
         if config.verbose:
             print(f"Error running rollout for task {task.id}: {error}", flush=True)
-        await run_cleanup()
         raise
     finally:
         await run_cleanup()

@@ -65,6 +65,9 @@ class TrainConfig:
     renderer_kwargs: dict = field(default_factory=dict)  # Optional renderer attribute overrides
     context_window_length: int | None = None
     batch_size: int = 32
+    # Sample B + K groups for a training batch of B groups (K * group_size extra rollouts).
+    # Unused results carry forward subject to max_staleness; worker concurrency is unchanged.
+    extra_rollout_groups: int = 0
     # Training duration: specify num_epochs, max_training_steps, or both (takes max)
     num_epochs: int | None = None
     max_training_steps: int | None = None
@@ -87,6 +90,8 @@ class TrainConfig:
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
     def __post_init__(self):
+        if self.extra_rollout_groups < 0:
+            raise ValueError("train.extra_rollout_groups must be nonnegative")
         if self.loss_fn_config is None:
             self.loss_fn_config = (
                 {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2}

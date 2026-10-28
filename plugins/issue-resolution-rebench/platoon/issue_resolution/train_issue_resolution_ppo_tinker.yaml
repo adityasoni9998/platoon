@@ -4,6 +4,8 @@
 # Each of the three tool-error categories costs 0.05 per turn; max total reward is 1.0.
 # Intermediate quality deltas are nonnegative; the final turn settles regressions.
 # Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
+# Initialize critic weights on the server with --critic-load plus
+# --finetune --no-load-optim --no-load-rng; leave client checkpoint loading disabled.
 # batch_size counts tasks: 512 tasks x 1 rollout = up to 512 trajectories/batch.
 # 512 concurrent group workers preserve the previous rollout concurrency.
 train:
@@ -12,6 +14,7 @@ train:
   renderer_name: qwen3_instruct_exact
   context_window_length: 65000
   batch_size: 512
+  extra_rollout_groups: 0
   num_epochs: null  # Use the 500-step budget instead of an epoch limit.
   max_training_steps: 500  # Includes 12 critic-only steps, then 488 actor/critic steps.
   num_minibatches: 1
@@ -64,6 +67,13 @@ train:
       timeout: 1800
       step_timeout: 600
       extra:
+        worker_start_method: forkserver  # exec retains the fresh-interpreter launcher.
+        workspace:
+          type: apptainer
+          apptainer:
+            sif_dir: /groups/gai51740/aci19058gb/apptainer/sif
+            cache_dir: /groups/gai51740/aci19058gb/apptainer/cache/apptainer
+            scratch_dir: null  # Required CLI override: current allocation's node-local scratch.
         max_input_tokens: 62952
         use_binary_reward: false
       inference_params:
@@ -84,12 +94,12 @@ checkpoint:
 watchdog:
   enabled: false
 
-log_path: /data/user_data/adityabs/miles_tinker_rebench/experiments
-tinker_base_url: null
+log_path: /groups/gai51740/aci19058gb/miles_hyperion
+tinker_base_url: null  # Set --tinker_base_url at launch.
 
 stats:
   experiment_name: issue-resolution-rebench-tinker
-  trial_name: qwen3-4b-instruct-cispo-critic-turn-rewards-b512-g1-k4
+  trial_name: qwen3-4b-cispo-critic110-apptainer-b512-g1-k4-20261029
   wandb:
     mode: online
     project: issue_resolution-miles
@@ -97,9 +107,4 @@ stats:
     tags: [issue_resolution, swe_rebench, tinker, cispo, critic, k4, turn_critic, turn_rewards]
 
 inference_tunnel:
-  backend: modal
-  modal:
-    app_name: platoon-inference-router
-    cpu: 0.125
-    memory: 128
-    timeout: 86400
+  backend: none

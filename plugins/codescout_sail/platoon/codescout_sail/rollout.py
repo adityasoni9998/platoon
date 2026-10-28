@@ -1,4 +1,4 @@
-"""CodeScout rollouts backed by OpenHands running in Sailboxes."""
+"""CodeScout rollouts backed by OpenHands in a configurable workspace."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 from openhands.sdk import LLM, Agent, Tool, get_logger
+from openhands.sdk.workspace import BaseWorkspace
 from openhands.tools.terminal import TerminalTool
 from openhands.workspace import SailWorkspace
 from platoon.config_defs import RolloutConfig
@@ -30,6 +31,7 @@ from platoon.codescout_sail.tasks import (
     NUM_RETRIES_SANDBOX_START,
     USER_PROMPT_FILENAME,
 )
+from platoon.codescout_sail.workspace import WorkspaceConfig
 
 logging.getLogger("openhands.sdk.conversation.impl.remote_conversation").setLevel(logging.CRITICAL)
 logger = get_logger(__name__)
@@ -88,8 +90,11 @@ def _sail_workspace(working_dir: str) -> SailWorkspace:
     )
 
 
-def prepare_workspace(instance: dict) -> tuple[Path, SailWorkspace]:
-    """Start a Sailbox and clone the task repository into it."""
+def prepare_workspace(
+    instance: dict, *, workspace_config: dict | None = None,
+) -> tuple[Path, BaseWorkspace]:
+    """Start the configured workspace and clone the task repository into it."""
+    config = WorkspaceConfig.model_validate(workspace_config or {})
     instance_id = str(instance["instance_id"])
     repo_name = str(instance["repo"])
     instance_dir_name = f"{repo_name.replace('/', '_')}_{instance_id}"
@@ -104,9 +109,13 @@ def prepare_workspace(instance: dict) -> tuple[Path, SailWorkspace]:
 
     last_error: Exception | None = None
     for attempt in range(1, NUM_RETRIES_SANDBOX_START + 1):
-        workspace: SailWorkspace | None = None
+        workspace: BaseWorkspace | None = None
         try:
-            workspace = _sail_workspace(str(instance_path))
+            if config.type == "apptainer":
+                assert config.apptainer is not None
+                workspace = config.apptainer.create_workspace(str(instance_path))
+            else:
+                workspace = _sail_workspace(str(instance_path))
             result = workspace.execute_command(
                 clone_command,
                 cwd="/workspace",
@@ -123,14 +132,17 @@ def prepare_workspace(instance: dict) -> tuple[Path, SailWorkspace]:
                 workspace.cleanup()
             if attempt < NUM_RETRIES_SANDBOX_START:
                 logger.warning(
-                    "Sail workspace setup attempt %s/%s failed for %s: %s",
+                    "%s workspace setup attempt %s/%s failed for %s: %s",
+                    config.type,
                     attempt,
                     NUM_RETRIES_SANDBOX_START,
                     instance_id,
                     error,
                 )
 
-    raise RuntimeError(f"Error preparing Sail workspace for instance {instance_id}: {last_error}")
+    raise RuntimeError(
+        f"Error preparing {config.type} workspace for instance {instance_id}: {last_error}"
+    )
 
 
 def get_instruction(instance: dict, prompt_path: str, workspace_path: str) -> str:
@@ -176,17 +188,19 @@ def prepare_llm(config: RolloutConfig, tinker_proxy_session_id: str | None = Non
 
 
 async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCollection:
-    """Run one CodeScout trajectory and destroy its Sailbox afterward."""
+    """Run one CodeScout trajectory and clean up its workspace afterward."""
     env: CodeScoutEnv | None = None
-    workspace: SailWorkspace | None = None
+    workspace: BaseWorkspace | None = None
     tinker_proxy = _get_active_tinker_proxy()
     tinker_session_id = str(uuid.uuid4()) if tinker_proxy is not None else None
 
     try:
         if config.verbose:
-            print(f"[run_rollout] Starting Sail rollout for task {task.id}", flush=True)
+            print(f"[run_rollout] Starting rollout for task {task.id}", flush=True)
 
-        working_dir, workspace = await asyncio.to_thread(prepare_workspace, task.misc)
+        working_dir, workspace = await asyncio.to_thread(
+            prepare_workspace, task.misc, workspace_config=config.extra.get("workspace"),
+        )
 
         prompt_path = (Path(__file__).parent / "prompts" / USER_PROMPT_FILENAME).resolve()
         if not prompt_path.exists():
@@ -242,6 +256,6 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             try:
                 await asyncio.wait_for(env.close(), timeout=180)
             except Exception as cleanup_error:
-                logger.warning("Sail cleanup failed for task %s: %s", task.id, cleanup_error)
+                logger.warning("Workspace cleanup failed for task %s: %s", task.id, cleanup_error)
         elif workspace is not None:
             await asyncio.to_thread(workspace.cleanup)

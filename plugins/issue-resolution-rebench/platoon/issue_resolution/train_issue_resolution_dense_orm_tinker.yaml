@@ -31,6 +31,8 @@ train:
       timeout: 1800
       step_timeout: 600
       extra:
+        workspace:
+          type: modal  # Set to apptainer and add paths as described in tinker.md.
         max_input_tokens: 62952
         use_binary_reward: false
       inference_params:

@@ -1,13 +1,23 @@
 # SWE-rebench issue-resolution training
 
 This plugin trains OpenHands on the `filtered` split of `adityasoni17/SWE-rebench`
-with AReaL or Tinker and one `ModalWorkspace` per rollout. It uses the pre-published Modal
+with AReaL or Tinker and one configurable workspace per rollout (Modal by default).
+For local Apptainer workspaces, see [the local setup](tinker.md#local-apptainer-workspaces-abci).
+Modal workspaces use the pre-published Modal
 named images produced by the `swerebench_modal` branch of
 `adityasoni9998/benchmarks`.
 
 Both training recipes run rollouts in subprocesses. For Tinker setup and
 automatic Modal proxy forwarding, see [tinker.md](tinker.md). The instructions
 below use AReaL.
+
+AReaL accepts the same `extra.workspace` configuration under
+`workflow_config.rollout_config` (without Tinker's `train` prefix). Set
+`inference_tunnel.backend: none` to use the internal proxy URLs directly;
+the default remains `ogma`. Each workspace runs on its rollout worker's host,
+where its SIF and node-local scratch paths must be accessible. Supply explicit
+workspace paths through YAML or launcher overrides.
+Test evaluation continues to use Modal with either workspace backend.
 
 The AReaL configuration uses a 65,000-token prompt-plus-completion context
 window, reserves 2,048 tokens for each completion (62,952 input tokens), and

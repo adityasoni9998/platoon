@@ -828,6 +828,143 @@ def test_actor_loss_defaults(loss_fn, low, high):
     assert cfg.workflow_config.algorithm == "ppo"
 
 
+def test_negative_extra_rollout_groups_rejected():
+    with pytest.raises(ValueError, match="extra_rollout_groups"):
+        config(extra_rollout_groups=-1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size,extra_groups,group_size", [(4, 1, 3), (256, 8, 1)])
+async def test_extra_groups_bypass_straggler_without_increasing_workers(
+    tmp_path, monkeypatch, batch_size, extra_groups, group_size
+):
+    cfg = config(extra_rollout_groups=extra_groups, max_staleness=1)
+    cfg.train.batch_size = cfg.train.num_concurrent_rollout_workflow_workers = batch_size
+    cfg.train.workflow_config.group_size = group_size
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    trainer.train_dataset = Dataset.from_list([{"task_id": str(i)} for i in range(batch_size + extra_groups)])
+    updates = []
+
+    async def update(trainer, shared, rows):
+        updates.append(rows)
+
+    monkeypatch.setattr("platoon.train.tinker.ppo.update_batch", update)
+
+    class Workflow:
+        started = active = peak = 0
+        straggler_cancelled = False
+
+        async def arun_episode(self, task):
+            self.started += 1
+            index = self.started
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                if index == 1:
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.straggler_cancelled = True
+                await asyncio.sleep(0)
+                return [datum() for _ in range(group_size)]
+            finally:
+                self.active -= 1
+
+    workflow = Workflow()
+    await asyncio.wait_for(trainer.train(workflow), timeout=10)
+    assert workflow.peak == batch_size
+    assert batch_size < workflow.started <= batch_size + extra_groups
+    assert workflow.active == 0 and workflow.straggler_cancelled
+    assert len(updates) == 1 and len(updates[0]) == batch_size * group_size
+    assert trainer.records[0]["stats"]["train/accepted_rollout_groups"] == batch_size
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_result", ["failed", "empty", "stale"])
+@pytest.mark.parametrize("extra_groups", [0, 1])
+async def test_extra_groups_replace_ineligible_results(tmp_path, monkeypatch, bad_result, extra_groups):
+    cfg = config(extra_rollout_groups=extra_groups, max_staleness=1)
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+
+    class Workflow:
+        started = 0
+
+        async def arun_episode(self, task):
+            self.started += 1
+            if self.started == 1:
+                if bad_result == "failed":
+                    raise RuntimeError("test rollout failure")
+                if bad_result == "empty":
+                    return []
+            row = datum()
+            # At step 0, version -1 is eligible; version -2 must be discarded.
+            row.loss_fn_inputs["checkpoint_version"] = tensor([-2 if self.started == 1 else -1])
+            return [row]
+
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    assert len(critic.frozen[0]) == 1 + extra_groups
+    assert trainer.records[0]["stats"]["train/total_datums_per_batch"] == 1 + extra_groups
+
+
+@pytest.mark.asyncio
+async def test_extra_group_budget_exhaustion_does_not_hang_or_sample_more(tmp_path, monkeypatch, caplog):
+    cfg = config(extra_rollout_groups=1, max_staleness=1)
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+
+    class Workflow:
+        started = 0
+
+        async def arun_episode(self, task):
+            self.started += 1
+            return None if self.started <= 2 else [datum()]
+
+    workflow = Workflow()
+    await asyncio.wait_for(trainer.train(workflow), timeout=10)
+    assert workflow.started == 3  # B + K, even when too few eligible results remain.
+    assert len(critic.frozen[0]) == 1
+    assert "Extra rollout allowance exhausted: using 1/2 eligible groups" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_extra_group_results_carry_into_next_batch_when_fresh(tmp_path, monkeypatch):
+    cfg = config(extra_rollout_groups=1, max_staleness=1)
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    started = 0
+    all_sampled = asyncio.Event()
+    updates = []
+
+    class Workflow:
+        async def arun_episode(self, task):
+            nonlocal started
+            started += 1
+            row = datum()
+            row.loss_fn_inputs["checkpoint_version"] = tensor([trainer.model_info.llm.version])
+            if started == 6:
+                all_sampled.set()
+            return [row]
+
+    async def update(trainer, shared, rows):
+        # Let both sampling waves finish on version 0 before the first update.
+        await all_sampled.wait()
+        updates.append(rows)
+
+    monkeypatch.setattr("platoon.train.tinker.ppo.update_batch", update)
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    assert started == 6 and [len(rows) for rows in updates] == [2, 2]
+    assert all(row.loss_fn_inputs["checkpoint_version"].data == [0] for rows in updates for row in rows)
+
+
 @pytest.mark.parametrize("field,value", [("gamma", 0.99), ("gae_lambda", 0.95)])
 def test_nonunit_gae_is_supported(field, value):
     from platoon.train.tinker.config_defs import PPOConfig

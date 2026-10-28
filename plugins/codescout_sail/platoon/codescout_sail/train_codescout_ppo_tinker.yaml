@@ -1,4 +1,4 @@
-# CodeScout on Sail: context and episode settings from codescout-platoon-tinker/rfchcgg4.
+# CodeScout on Apptainer: context and episode settings from codescout-platoon-tinker/rfchcgg4.
 # 256 tasks per batch, one rollout per task, up to 256 concurrent rollouts.
 # PPO and optimizer settings from number_search_ppo_tinker.yaml.
 # Requires a full-parameter Miles-Tinker server with --tinker-enable-critic.
@@ -61,6 +61,13 @@ train:
       output_dir: /data/user_data/adityabs/miles_sail/rollouts
       verbose: true
       timeout: 600
+      extra:
+        workspace:
+          type: apptainer
+          apptainer:
+            sif_path: null
+            cache_dir: null
+            scratch_dir: null
       inference_params:
         temperature: 1.0
         top_p: 1.0
@@ -79,7 +86,7 @@ log_path: /data/user_data/adityabs/miles_sail
 tinker_base_url: null
 
 inference_tunnel:
-  backend: modal
+  backend: none
   modal:
     app_name: codescout-sail-inference-router
     cpu: 0.125

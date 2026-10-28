@@ -1,4 +1,4 @@
-"""Select the public inference relay independently of the training backend."""
+"""Select or disable the inference relay independently of the training backend."""
 
 import logging
 import time
@@ -51,6 +51,9 @@ def inference_tunnels(proxy_urls: list[str], config: InferenceTunnelConfig | Non
         raise ValueError("Expected at least one inference proxy URL")
     for url in urls:
         target_host_port(url)
+    if config.backend == "none":
+        yield {url: url for url in urls}
+        return
     with ExitStack() as stack:
         if config.backend == "ogma":
             forward = stack.enter_context(ssh_connection(f"adityabs@{OGMA_HOST}"))
@@ -60,7 +63,10 @@ def inference_tunnels(proxy_urls: list[str], config: InferenceTunnelConfig | Non
 
             endpoints = stack.enter_context(modal_tunnels(urls, config.modal))
         else:
-            raise ValueError(f"Unknown inference_tunnel.backend {config.backend!r}; expected 'ogma' or 'modal'")
+            raise ValueError(
+                f"Unknown inference_tunnel.backend {config.backend!r}; "
+                "expected 'none', 'ogma' or 'modal'"
+            )
         for internal, public in endpoints.items():
             wait_for_health(public)
             logger.info("Forwarded inference proxy %s through %s", internal, public)

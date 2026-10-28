@@ -36,6 +36,7 @@ from platoon.utils.config import load_config
 from platoon.issue_resolution.rollout import run_rollout
 from platoon.issue_resolution.tasks import get_task, load_data
 from platoon.issue_resolution.tinker_workflow import TinkerProxyRollout, routed_tinker_proxy
+from platoon.openhands.apptainer_namespace import shared_apptainer_namespace
 
 
 @dataclass
@@ -67,7 +68,11 @@ def main(args: list[str]):
 
     # Rollout children are reaped before the training loop exits and closes the
     # shared proxy and tunnel. Workflow concurrency bounds the number of children.
-    with routed_tinker_proxy(trainer.model_info, config.inference_tunnel) as proxy:
+    workspace = config.train.workflow_config.rollout_config.extra.get("workspace", {})
+    with (
+        shared_apptainer_namespace(enabled=workspace.get("type") == "apptainer"),
+        routed_tinker_proxy(trainer.model_info, config.inference_tunnel) as proxy,
+    ):
         asyncio.run(train(trainer, TinkerProxyRollout(run_rollout, proxy)))
 
 
@@ -82,7 +87,10 @@ async def train(trainer, rollout_fn):
             stats_scope="train",
             filter_errors=False,
         )
-        await trainer.train(train_workflow=train_workflow, eval_workflow=None)
+        try:
+            await trainer.train(train_workflow=train_workflow, eval_workflow=None)
+        finally:
+            await rollout_fn.aclose()
 
 
 if __name__ == "__main__":
