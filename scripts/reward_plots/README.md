@@ -208,3 +208,31 @@ smoothing. Only the named run changes. Omit `--rebase-skipped-steps` to retain
 original step numbers; with it, original step 12 becomes step 0. Both options
 also work with `plot_orm_comparison.py`. Defaults are unchanged. Saved raw
 metrics remain complete; `plot_options.json` records the rendered selection.
+
+### Include the October 26 hariom run
+
+The active run `rebench-cispo-critic-b512-g1-k4-20261026-123718` uses a CISPO
+actor and a turn-level critic with four critic minibatches per trainer batch.
+Its display label is `CISPO + Turn critic (K=4)`. Add it to all five-run
+comparisons from `~/hyperion_ppo2`:
+
+```bash
+python scripts/reward_plots/refresh_ppo_comparison.py --workers 64
+```
+
+This refreshes reward grids, EV overlays, and limit-hit overlays in the separate
+`artifacts/orm_comparison_with_cispo_critic`,
+`artifacts/ppo_ev_comparison_with_cispo_critic`, and
+`artifacts/limit_audit_with_cispo_critic` directories. Each also has a
+`_no_warmup` counterpart. The original four-run figures remain available.
+
+Both turn-reward critic runs use final-settlement dense ORM reconstruction in
+mean-reward panels only, with the original reward defaults and sampling.
+The grid and limit plots skip the last two rollout directories. All curves use
+trailing 16-step means. EV uses the logged pre-update, turn-level batch moments;
+four critic minibatches do not produce four separate EV observations.
+The warmup-excluded versions remove each turn-reward critic run's first 12
+training batches before smoothing, then rebase steps. A run still entirely in
+warmup is labeled `no post-warmup data` and contributes no curve until data exist.
+The new run is red; existing run colors are preserved. Limit scans use 64 worker
+processes by default (`--workers` changes this) and reuse the existing cache.

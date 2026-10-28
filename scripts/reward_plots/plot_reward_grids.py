@@ -42,6 +42,8 @@ def main(argv=None):
                         metavar=('RUN', 'N'), help='For RUN, omit zero-based training steps below N before smoothing (repeatable)')
     parser.add_argument('--rebase-skipped-steps', action='store_true',
                         help='Subtract each run\'s skipped step count from its plotted step numbers')
+    parser.add_argument('--allow-empty-after-skip', action='store_true',
+                        help='Label runs with no post-warmup data instead of failing')
     args = parser.parse_args(argv)
     summary = json.loads((args.input_dir/'summary.json').read_text())
     with (args.input_dir/'metrics.csv').open() as f:
@@ -61,9 +63,12 @@ def main(argv=None):
     if args.rebase_skipped_steps and not skip_first:
         parser.error('--rebase-skipped-steps requires --skip-first-steps')
     rows = [r for r in rows if int(r['step']) >= skip_first.get(r.get('run', ''), 0)]
-    for run in original_runs:
-        if not any(r.get('run', '') == run for r in rows):
+    omitted_runs = [run for run in original_runs if not any(r.get('run', '') == run for r in rows)]
+    for run in omitted_runs:
+        if not args.allow_empty_after_skip:
             parser.error(f'No steps remain for {run}')
+    if not rows:
+        parser.error('No steps remain for any run')
     if args.rebase_skipped_steps:
         for row in rows:
             row['step'] = str(int(row['step']) - skip_first.get(row.get('run', ''), 0))
@@ -91,9 +96,9 @@ def main(argv=None):
         parser.error('--window must be positive')
     alignment = args.alignment or summary.get('alignment', 'trailing' if comparison else 'centered')
     runs = list(dict.fromkeys(r.get('run', '') for r in rows))
-    colors = dict(zip(runs, ['#1673b8', '#e27718', '#27955b', '#9361b0']))
-    if len(runs) > len(colors):
-        parser.error('At most four overlaid runs are supported')
+    colors = dict(zip(original_runs, ['#1673b8', '#e27718', '#27955b', '#9361b0', '#c44e52']))
+    if len(original_runs) > len(colors):
+        parser.error('At most five overlaid runs are supported')
     grids = {'all_rewards': [component for group in GRIDS.values() for component in group]} if args.combined else GRIDS
     def overall_mean(component):
         data = [r for r in rows if r['component'] == component and int(r['eligible_instances']) > 0]
@@ -135,7 +140,8 @@ def main(argv=None):
                               for step, value in zip(steps, smooth)]
                     if not args.smooth_only:
                         ax.plot(steps, raw, color=colors[run], lw=1, alpha=.3)
-                    ax.plot(steps, smooth, color=colors[run], lw=2.2)
+                    ax.plot(steps, smooth, color=colors[run], lw=2.2,
+                            marker='o' if len(steps)<10 else None, markersize=4)
                 if args.horizontal:
                     if col_index == 0:
                         ax.set_title(label, fontsize=26, pad=20)
@@ -165,9 +171,11 @@ def main(argv=None):
         handles = [Line2D([0], [0], color=colors[run], lw=2.2,
                           label=(run + ' (mean only)' if run in summary.get('mean_only_runs', []) else run)
                           or f'{alignment.title()} {window}-step average') for run in runs]
+        handles.extend(Line2D([0], [0], color=colors[run], lw=2.2,
+                              label=run+' (no post-warmup data)') for run in omitted_runs)
         if not args.smooth_only:
             handles.append(Line2D([0], [0], color='gray', lw=1, alpha=.3, label='Per training step'))
-        fig.legend(handles=handles, loc='upper center', ncol=len(handles), frameon=False,
+        fig.legend(handles=handles, loc='upper center', ncol=3 if len(handles)>4 else len(handles), frameon=False,
                    bbox_to_anchor=(.5, .974), fontsize=22)
         fig.subplots_adjust(left=.04 if args.horizontal else .065, right=.985,
                             bottom=.08 if args.horizontal else (.035 if args.combined else .09),
@@ -192,7 +200,8 @@ def main(argv=None):
             'window': window, 'alignment': alignment,
             'plotted_step_ranges': {run: [min(int(r['step']) for r in rows if r.get('run', '') == run),
                                           max(int(r['step']) for r in rows if r.get('run', '') == run)]
-                                    for run in original_runs},
+                                    for run in runs},
+            'omitted_runs': omitted_runs,
             'smoothing': 'Computed after excluding warmup; excluded steps never enter running averages',
         }, indent=2)+'\n')
 

@@ -109,7 +109,7 @@ def main():
     p.add_argument('sparse', type=Path)
     p.add_argument('--extra-run', nargs=2, action='append', default=[],
                    metavar=('LABEL', 'PATH'),
-                   help='Overlay another run using the same calculations; accepts its root or rollouts/train directory (repeatable, at most two)')
+                   help='Overlay another run using the same calculations; accepts its root or rollouts/train directory (repeatable, at most five runs total)')
     p.add_argument('--turn-reward-run', nargs=2, action='append', default=[],
                    metavar=('LABEL', 'PATH'),
                    help='Overlay reconstructed dense ORM from a turn-reward run in mean-reward panels only; final patch state plus whole-trajectory formatting rewards')
@@ -138,8 +138,8 @@ def main():
         if root.name == 'train' and root.parent.name == 'rollouts':
             root = root.parent.parent
         runs.append((label, root, None))
-    if len(runs) > 4 or len({name for name, _, _ in runs}) != len(runs):
-        p.error('Use at most four runs with distinct labels')
+    if len(runs) > 5 or len({name for name, _, _ in runs}) != len(runs):
+        p.error('Use at most five runs with distinct labels')
     if len({root.resolve() for _, root, _ in runs}) != len(runs):
         p.error('Run directories must be distinct')
     skip_labels = set()

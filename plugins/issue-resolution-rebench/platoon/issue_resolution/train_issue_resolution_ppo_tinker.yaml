@@ -1,4 +1,5 @@
-# PPO with turn-level tool penalties and settled localization/test deltas.
+# CISPO actor with a turn-level critic, tool penalties, and settled quality deltas.
+# Match CodeScout: K=4, critic LR=5e-6, beta2=.95 and weight_decay=.017 for both models.
 # env.py fixes turn reward weights at 0.30 localization and 0.70 testing.
 # Each of the three tool-error categories costs 0.05 per turn; max total reward is 1.0.
 # Intermediate quality deltas are nonnegative; the final turn settles regressions.
@@ -17,16 +18,16 @@ train:
   num_microbatches: 1
   max_staleness: 1
   lora_rank: 0
-  loss_fn: ppo
+  loss_fn: cispo
   loss_fn_config:
-    clip_low_threshold: 0.8
-    clip_high_threshold: 1.2
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
   optimizer:
     learning_rate: 1.0e-6
     beta1: 0.9
-    beta2: 0.98
+    beta2: 0.95
     eps: 1.0e-8
-    weight_decay: 0.1
+    weight_decay: 0.017
     grad_clip_norm: 1.0
   ppo:
     value_granularity: turn
@@ -39,16 +40,17 @@ train:
     actor_epochs: 1
     critic_epochs: 1
     critic_warmup_batches: 12  # One loader epoch: floor(6542 / 512), with drop_last=True.
+    # K=4 gives 48 critic optimizer updates across those 12 warmup batches.
     critic:
       value_clip: 0.2
-      num_minibatches: 1
+      num_minibatches: 4
       num_microbatches: 1
       optimizer:
-        learning_rate: 1.0e-5
+        learning_rate: 5.0e-6
         beta1: 0.9
-        beta2: 0.98
+        beta2: 0.95
         eps: 1.0e-8
-        weight_decay: 0.1
+        weight_decay: 0.017
         grad_clip_norm: 1.0
   workflow_config:
     group_size: 1
@@ -87,12 +89,12 @@ tinker_base_url: null
 
 stats:
   experiment_name: issue-resolution-rebench-tinker
-  trial_name: qwen3-4b-instruct-ppo-turn-rewards-b512-g1
+  trial_name: qwen3-4b-instruct-cispo-critic-turn-rewards-b512-g1-k4
   wandb:
     mode: online
     project: issue_resolution-miles
     entity: null
-    tags: [issue_resolution, swe_rebench, tinker, ppo, dense_orm, turn_critic, turn_rewards]
+    tags: [issue_resolution, swe_rebench, tinker, cispo, critic, k4, turn_critic, turn_rewards]
 
 inference_tunnel:
   backend: modal
