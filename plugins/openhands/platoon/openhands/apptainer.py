@@ -15,7 +15,7 @@ from pydantic import Field, PrivateAttr
 from openhands.sdk import get_logger
 from openhands.workspace import ApptainerWorkspace
 
-from platoon.openhands.apptainer_namespace import NAMESPACE_ENV, namespace_command
+from platoon.openhands.apptainer_namespace import NAMESPACE_ENV, namespace_command, shared_apptainer_namespace
 
 logger = get_logger(__name__)
 
@@ -167,9 +167,25 @@ class DirectoryOverlayWorkspace(ApptainerWorkspace):
             if self._port_claim is not None:
                 self._port_claim.close()
                 self._port_claim = None
-        if self._runtime_dir is not None:
-            try:
-                shutil.rmtree(self._runtime_dir)
-            except Exception:
-                pass
-            self._runtime_dir = None
+            if self._runtime_dir is not None:
+                try:
+                    # Files created as container users belong to subordinate host
+                    # IDs. Delete with the same mappings after stopping the sandbox.
+                    with shared_apptainer_namespace(enabled=self.use_fakeroot):
+                        namespace = os.environ.get(NAMESPACE_ENV) if self.use_fakeroot else None
+                        if namespace:
+                            subprocess.run(
+                                namespace_command(namespace, ["/bin/rm", "-rf", "--", str(self._runtime_dir)]),
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                                timeout=60,
+                            )
+                        else:
+                            shutil.rmtree(self._runtime_dir)
+                except Exception as error:
+                    # Cleanup failures must not lose the rollout, but report the
+                    # retained path so disk leaks are visible.
+                    logger.warning("Could not remove Apptainer runtime directory %s: %s", self._runtime_dir, error)
+                else:
+                    self._runtime_dir = None

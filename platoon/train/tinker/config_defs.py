@@ -80,6 +80,9 @@ class TrainConfig:
     # to overlap rollout sampling with forward backward computation within the same batch.
     num_microbatches: int = 1
     max_staleness: int | None = None  # Max staleness for off-policy rollouts
+    # Start a batch without waiting for its final K% of groups if the result queue is empty.
+    # Stale/failed results count as consumed slots, just as with tolerance disabled.
+    rollout_tail_tolerance_pct: float = 0.0
     optimizer: AdamParams = field(default_factory=AdamParams)
     loss_fn: str = "cispo"
     loss_fn_config: dict | None = None
@@ -90,6 +93,8 @@ class TrainConfig:
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
     def __post_init__(self):
+        if not 0 <= self.rollout_tail_tolerance_pct < 100:
+            raise ValueError("train.rollout_tail_tolerance_pct must be in [0, 100)")
         if self.extra_rollout_groups < 0:
             raise ValueError("train.extra_rollout_groups must be nonnegative")
         if self.loss_fn_config is None:

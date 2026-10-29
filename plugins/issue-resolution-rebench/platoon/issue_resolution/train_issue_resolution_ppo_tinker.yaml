@@ -15,8 +15,9 @@ train:
   context_window_length: 65000
   batch_size: 512
   extra_rollout_groups: 0
+  rollout_tail_tolerance_pct: 2.0  # Stop waiting after 502/512 slots (including stale/failed results) if the queue is empty.
   num_epochs: null  # Use the 500-step budget instead of an epoch limit.
-  max_training_steps: 500  # Includes 12 critic-only steps, then 488 actor/critic steps.
+  max_training_steps: 500
   num_minibatches: 1
   num_microbatches: 1
   max_staleness: 1

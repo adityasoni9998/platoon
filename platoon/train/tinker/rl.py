@@ -560,6 +560,9 @@ class PlatoonTinkerRLTrainer:
             total_datums = 0
             remaining_extra_groups = self.config.train.extra_rollout_groups
             accepted_groups = 0
+            consumed_groups = 0
+            tail_tolerance = self.config.train.rollout_tail_tolerance_pct
+            minimum_groups = self.config.train.batch_size - int(self.config.train.batch_size * tail_tolerance / 100)
 
             # We perform num_minibatches weight updates per batch.
             for minibatch_num in range(self.config.train.num_minibatches):
@@ -583,7 +586,27 @@ class PlatoonTinkerRLTrainer:
                             f"Waiting for rollout {task_num + 1}/{tasks_per_microbatch} "
                             f"(minibatch {minibatch_num}, microbatch {microbatch_num})"
                         )
-                        rollout = await task_rollout_result_queue.get()
+                        # Stale/failed results still consume nominal batch slots, as
+                        # they do without tail tolerance (after any extra replacements).
+                        if tail_tolerance and consumed_groups >= minimum_groups:
+                            try:
+                                rollout = task_rollout_result_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                shared_state.train_tracker.scalar(
+                                    rollout_tail_skipped_groups=tasks_per_microbatch - task_num
+                                )
+                                logger.info(
+                                    "Starting batch %d after consuming %d/%d groups (%d eligible): "
+                                    "result queue empty within %.2f%% tolerance",
+                                    shared_state.train_step,
+                                    consumed_groups,
+                                    self.config.train.batch_size,
+                                    accepted_groups,
+                                    tail_tolerance,
+                                )
+                                break
+                        else:
+                            rollout = await task_rollout_result_queue.get()
                         queue_wait_elapsed = time.perf_counter() - queue_wait_start
                         rollout_queue_wait_total += queue_wait_elapsed
                         if queue_wait_elapsed > 60.0:
@@ -598,7 +621,16 @@ class PlatoonTinkerRLTrainer:
                             else:
                                 rollout_checkpoint_version = shared_state.train_step  # Assume current if not present
 
-                            if shared_state.train_step - rollout_checkpoint_version > self.config.train.max_staleness:
+                            current_version = shared_state.train_step
+                            if shared_state.critic_client is not None:
+                                warmup = self.config.train.ppo.critic_warmup_batches
+                                if warmup:
+                                    # All versions through warmup have the same actor weights.
+                                    # Collapse them for age checks, including after warmup ends,
+                                    # while keeping checkpoint numbering and prefetch unchanged.
+                                    current_version = max(current_version, warmup)
+                                    rollout_checkpoint_version = max(rollout_checkpoint_version, warmup)
+                            if current_version - rollout_checkpoint_version > self.config.train.max_staleness:
                                 logger.info(
                                     f"Stale rollout detected in batch {shared_state.train_step}. Filtering out."
                                 )
@@ -611,6 +643,7 @@ class PlatoonTinkerRLTrainer:
                             remaining_extra_groups -= 1
                             continue
                         task_num += 1
+                        consumed_groups += 1
                         if rollout:
                             task_rollout_results.extend(rollout)
                             total_datums += len(rollout)
@@ -803,9 +836,9 @@ class PlatoonTinkerRLTrainer:
                         shared_state.train_tracker.scalar(**{f"optim/{key}": value})
 
             shared_state.train_tracker.scalar(total_datums_per_batch=total_datums)
-            if self.config.train.extra_rollout_groups:
+            if self.config.train.extra_rollout_groups or tail_tolerance:
                 shared_state.train_tracker.scalar(accepted_rollout_groups=accepted_groups)
-                if accepted_groups < self.config.train.batch_size:
+                if self.config.train.extra_rollout_groups and accepted_groups < consumed_groups:
                     logger.warning(
                         "Extra rollout allowance exhausted: using %d/%d eligible groups in batch %d",
                         accepted_groups,

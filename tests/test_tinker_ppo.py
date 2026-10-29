@@ -833,6 +833,146 @@ def test_negative_extra_rollout_groups_rejected():
         config(extra_rollout_groups=-1)
 
 
+@pytest.mark.parametrize("percent", [-1, 100, float("nan")])
+def test_invalid_rollout_tail_tolerance(percent):
+    with pytest.raises(ValueError, match="rollout_tail_tolerance_pct"):
+        config(rollout_tail_tolerance_pct=percent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("percent,group_size,expected", [(1, 1, 507), (2, 3, 502)])
+async def test_tail_tolerance_starts_without_final_groups(tmp_path, monkeypatch, percent, group_size, expected):
+    cfg = config(rollout_tail_tolerance_pct=percent)
+    cfg.train.batch_size = cfg.train.num_concurrent_rollout_workflow_workers = 512
+    cfg.train.workflow_config.group_size = group_size
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    trainer.train_dataset = Dataset.from_list([{"task_id": str(i)} for i in range(512)])
+    updates = []
+
+    async def update(trainer, shared, rows):
+        updates.append(rows)
+
+    monkeypatch.setattr("platoon.train.tinker.ppo.update_batch", update)
+
+    class Workflow:
+        async def arun_episode(self, task):
+            if int(task["task_id"]) >= expected:
+                await asyncio.Event().wait()
+            await asyncio.sleep(0)
+            return [datum() for _ in range(group_size)]
+
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    assert len(updates) == 1 and len(updates[0]) == expected * group_size
+    assert trainer.records[0]["stats"]["train/accepted_rollout_groups"] == expected
+    assert trainer.records[0]["stats"]["train/rollout_tail_skipped_groups"] == 512 - expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("percent", [0, 1, 2])
+async def test_tail_tolerance_consumes_all_ready_groups(tmp_path, monkeypatch, percent):
+    cfg = config(rollout_tail_tolerance_pct=percent)
+    cfg.train.batch_size = cfg.train.num_concurrent_rollout_workflow_workers = 100
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    trainer.train_dataset = Dataset.from_list([{"task_id": str(i)} for i in range(100)])
+
+    class Workflow:
+        async def arun_episode(self, task):
+            return [datum()]
+
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    assert trainer.records[0]["stats"]["train/total_datums_per_batch"] == 100
+    assert "train/rollout_tail_skipped_groups" not in trainer.records[0]["stats"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("percent,stale,ready", [(0, False, 99), (1, True, 98)])
+async def test_tail_waits_below_consumed_threshold(tmp_path, monkeypatch, percent, stale, ready):
+    cfg = config(rollout_tail_tolerance_pct=percent, max_staleness=1)
+    cfg.train.ppo.critic_warmup_batches = 0
+    cfg.train.batch_size = cfg.train.num_concurrent_rollout_workflow_workers = 100
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    trainer.train_dataset = Dataset.from_list([{"task_id": str(i)} for i in range(100)])
+    fast_done, release_tail, updated = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    updates = []
+
+    async def update(trainer, shared, rows):
+        updates.append(rows)
+        updated.set()
+
+    monkeypatch.setattr("platoon.train.tinker.ppo.update_batch", update)
+
+    class Workflow:
+        finished = 0
+
+        async def arun_episode(self, task):
+            if int(task["task_id"]) >= ready:
+                await release_tail.wait()
+            else:
+                self.finished += 1
+                if self.finished == ready:
+                    fast_done.set()
+            row = datum()
+            row.loss_fn_inputs["checkpoint_version"] = tensor([-2 if stale and task["task_id"] == "0" else 0])
+            return [row]
+
+    run = asyncio.create_task(trainer.train(Workflow()))
+    try:
+        await asyncio.wait_for(fast_done.wait(), timeout=10)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(updated.wait(), timeout=0.05)
+        release_tail.set()
+        await asyncio.wait_for(run, timeout=10)
+    finally:
+        if not run.done():
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+    assert len(updates[0]) == (99 if stale else 100)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["stale", "empty"])
+async def test_tail_counts_discarded_results_as_consumed_slots(tmp_path, monkeypatch, invalid):
+    cfg = config(rollout_tail_tolerance_pct=2, max_staleness=1)
+    cfg.train.ppo.critic_warmup_batches = 0
+    cfg.train.batch_size = cfg.train.num_concurrent_rollout_workflow_workers = 512
+    cfg.train.max_training_steps = 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    trainer.train_dataset = Dataset.from_list([{"task_id": str(i)} for i in range(512)])
+    updates = []
+
+    async def update(trainer, shared, rows):
+        updates.append(rows)
+
+    monkeypatch.setattr("platoon.train.tinker.ppo.update_batch", update)
+
+    class Workflow:
+        async def arun_episode(self, task):
+            index = int(task["task_id"])
+            if index >= 505:
+                await asyncio.Event().wait()
+            if index < 10 and invalid == "empty":
+                return []
+            row = datum()
+            row.loss_fn_inputs["checkpoint_version"] = tensor([-2 if index < 10 else 0])
+            return [row]
+
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    assert len(updates) == 1 and len(updates[0]) == 495
+    assert trainer.records[0]["stats"]["train/accepted_rollout_groups"] == 495
+    assert trainer.records[0]["stats"]["train/rollout_tail_skipped_groups"] == 7
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batch_size,extra_groups,group_size", [(4, 1, 3), (256, 8, 1)])
 async def test_extra_groups_bypass_straggler_without_increasing_workers(
@@ -888,6 +1028,7 @@ async def test_extra_groups_bypass_straggler_without_increasing_workers(
 async def test_extra_groups_replace_ineligible_results(tmp_path, monkeypatch, bad_result, extra_groups):
     cfg = config(extra_rollout_groups=extra_groups, max_staleness=1)
     cfg.train.max_training_steps = 1
+    cfg.train.ppo.critic_warmup_batches = 0
     actor, critic, _ = clients()
     install_clients(monkeypatch, actor, critic)
     trainer = make_trainer(tmp_path, cfg)
@@ -910,6 +1051,48 @@ async def test_extra_groups_replace_ineligible_results(tmp_path, monkeypatch, ba
     await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
     assert len(critic.frozen[0]) == 1 + extra_groups
     assert trainer.records[0]["stats"]["train/total_datums_per_batch"] == 1 + extra_groups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "start_batch,rollout_version,max_staleness,accepted",
+    [
+        (0, 0, 0, True),
+        (2, 0, 0, True),  # Critic updates must not age the unchanged actor.
+        (3, 0, 0, True),  # First actor update can consume the earliest warmup version.
+        (3, 2, 0, True),
+        (4, 0, 1, True),  # One actor update has now completed.
+        (4, 2, 1, True),
+        (4, 0, 0, False),
+        (5, 0, 1, False),  # Two actor updates make the warmup version stale.
+        (5, 4, 1, True),
+        (5, 0, None, True),
+    ],
+)
+async def test_warmup_rollout_age_and_actor_transition(
+    tmp_path, monkeypatch, start_batch, rollout_version, max_staleness, accepted
+):
+    cfg = config(max_staleness=max_staleness)
+    cfg.train.ppo.critic_warmup_batches = 3
+    cfg.train.max_training_steps = start_batch + 1
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+    if start_batch:
+        trainer._ppo_resume = await save_pair(actor, critic, tmp_path, batch=start_batch, wandb_run_id="run")
+
+    class Workflow:
+        async def arun_episode(self, task):
+            row = datum()
+            row.loss_fn_inputs["checkpoint_version"] = tensor([rollout_version])
+            return [row]
+
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    stats = trainer.records[0]["stats"]
+    assert stats["train/total_datums_per_batch"] == (cfg.train.batch_size if accepted else 0)
+    assert stats.get("train/stale_rollouts__count", 0) == (0 if accepted else cfg.train.batch_size)
+    assert critic.steps == int(accepted)
+    assert actor.steps == int(accepted and start_batch >= 3)
 
 
 @pytest.mark.asyncio
