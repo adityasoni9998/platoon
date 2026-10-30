@@ -1229,3 +1229,27 @@ async def test_existing_grpo_loop_still_uses_only_actor(tmp_path, monkeypatch):
     assert actor.steps == 1
     assert [e for e in bus["events"] if e[0] == "backward"] == [("backward", "policy", "cispo")]
     assert shared.critic_client is None
+
+
+@pytest.mark.asyncio
+async def test_dataloader_releases_next_batch_as_soon_as_a_step_finishes():
+    from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
+
+    shared = SimpleNamespace(
+        shutdown_event=asyncio.Event(),
+        train_step=0,
+        train_step_advanced=asyncio.Event(),
+        train_dataloader=SimpleNamespace(get_batch=lambda i: [{"task_id": f"{i}-{j}"} for j in range(2)]),
+    )
+    trainer = SimpleNamespace(config=SimpleNamespace(train=SimpleNamespace(max_staleness=1)))
+    queue = asyncio.Queue()
+    loader = asyncio.create_task(PlatoonTinkerRLTrainer._train_dataloader_loop(trainer, shared, 0, 5, queue))
+    try:
+        await asyncio.sleep(0.05)
+        assert queue.qsize() == 4  # batches 0 and 1; batch 2 waits for step 1
+        shared.train_step = 1
+        shared.train_step_advanced.set()
+        await asyncio.sleep(0.05)
+        assert queue.qsize() == 6
+    finally:
+        loader.cancel()

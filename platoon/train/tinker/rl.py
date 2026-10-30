@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import tinker
@@ -262,6 +262,8 @@ class TrainLoopSharedState:
     stats_logger: StatsLogger
     train_tracker: StatsTracker
     watchdog: Watchdog | None = None
+    # Set whenever train_step advances, so the dataloader releases the next batch at once.
+    train_step_advanced: asyncio.Event = field(default_factory=asyncio.Event)
     critic_client: tinker.TrainingClient | None = None
     ppo_batch_in_progress: bool = False
 
@@ -411,9 +413,10 @@ class PlatoonTinkerRLTrainer:
         i_batch = start_batch
         max_staleness = self.config.train.max_staleness
         while not shared_state.shutdown_event.is_set() and i_batch < end_batch:
-            # Control staleness by waiting for training to catch up.
+            # Control staleness by waiting for training to catch up; wake as soon as a step finishes.
             if max_staleness is not None and i_batch - shared_state.train_step > max_staleness:
-                await asyncio.sleep(20.0)
+                shared_state.train_step_advanced.clear()
+                await shared_state.train_step_advanced.wait()
                 continue
 
             batch = shared_state.train_dataloader.get_batch(i_batch)
@@ -877,6 +880,7 @@ class PlatoonTinkerRLTrainer:
             shared_state.train_tracker.scalar(update_weights_time=update_elapsed)
 
             shared_state.train_step += 1
+            shared_state.train_step_advanced.set()
             shared_state.ppo_batch_in_progress = False
             shared_state.sampling_client_step += 1
 
