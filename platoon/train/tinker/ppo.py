@@ -298,6 +298,10 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
             forward_backward_submit=0.0, forward_backward_wait=0.0, optim_step_submit=0.0, optim_step_wait=0.0
         )
         prepare_inputs_total = 0.0
+        # Submit every update of this role before awaiting any result. The server applies each
+        # optim_step before the same model's next forward_backward, so updates stay sequential,
+        # but the GPUs no longer idle while the client fetches results and builds the next minibatch.
+        submitted = []
         for minibatch in minibatches * epochs:
             start = time.perf_counter()
             # Normalize over this minibatch; targets and old values remain frozen.
@@ -310,6 +314,8 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
             start = time.perf_counter()
             optim_future = await client.optim_step_async(tinker.AdamParams(**asdict(optimizer)))
             timings["optim_step_submit"] += time.perf_counter() - start
+            submitted.append((minibatch, metric_inputs, backward_future, optim_future))
+        for minibatch, metric_inputs, backward_future, optim_future in submitted:
             start = time.perf_counter()
             result = await resolve(backward_future, f"{role} forward_backward")
             timings["forward_backward_wait"] += time.perf_counter() - start

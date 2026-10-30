@@ -542,6 +542,24 @@ async def test_critic_minibatches_preserve_targets_and_actor_advantages(
 
 
 @pytest.mark.asyncio
+async def test_critic_updates_are_submitted_before_results_are_awaited(tmp_path):
+    cfg = config(ppo=PPOConfig(value_granularity="turn", critic_warmup_batches=0, critic=CriticConfig(num_minibatches=4)))
+    actor, critic, bus = clients()
+    shared = SimpleNamespace(
+        training_client=actor, critic_client=critic, train_tracker=StatsTracker("test"), train_step=0, watchdog=None
+    )
+    await update_batch(make_trainer(tmp_path, cfg), shared, [datum(float(i)) for i in range(8)])
+    critic_events = [e[0] for e in bus["events"] if e[1] == "critic"]
+    # Four forward_backward/optim_step pairs go out in order before the first result is read.
+    assert critic_events == ["backward", "step"] * 4 + ["backward_result", "step_result"] * 4
+    # The actor still starts only after the critic's last optimizer result.
+    last_critic = max(i for i, e in enumerate(bus["events"]) if e == ("step_result", "critic"))
+    first_actor = min(i for i, e in enumerate(bus["events"]) if e[1] == "policy")
+    assert first_actor > last_critic
+    assert critic.steps == 4 and actor.steps == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failed_method", ["save_state_async", "save_weights_for_sampler_async"])
 async def test_pair_failure_keeps_manifest_and_restores_adam_for_next_update(tmp_path, failed_method):
     actor, critic, bus = clients()
@@ -703,8 +721,14 @@ async def test_existing_async_loop_overlaps_rollouts_and_resumes_pair(tmp_path, 
     steps = [event[1] for event in bus["events"] if event[0] == "step"]
     assert steps == ["critic"] * 4 + ["policy"] * 2
     update_events = {"backward", "step", "backward_result", "step_result"}
+    # Each role submits all its updates (two epochs) before reading any result; in each step the critic
+    # finishes before the actor starts. Step 1 is critic warmup; step 2 trains both.
     assert [event[:2] for event in bus["events"] if event[0] in update_events] == [
-        (event, role) for role in steps for event in ("backward", "step", "backward_result", "step_result")
+        (event, role)
+        for role, count in (("critic", 2), ("critic", 2), ("policy", 2))
+        for pair in (("backward", "step"), ("backward_result", "step_result"))
+        for _ in range(count)
+        for event in pair
     ]
     for key in ("values", "returns", "weights"):
         torch.testing.assert_close(
