@@ -105,3 +105,31 @@ async def test_async_prompt_preparation_and_parsing_run_off_loop_and_preserve_se
 
     ids = await asyncio.gather(request(1), request(2))
     assert len(set(ids)) == 2
+
+
+@pytest.mark.parametrize("logprobs", [[-0.5, -1.25, -0.0625], None])
+def test_record_comes_from_sample_and_response_omits_logprobs_and_prompt(logprobs):
+    renderer = Mock()
+    renderer.get_stop_sequences.return_value = []
+    renderer.build_generation_prompt.return_value = tinker.ModelInput.from_ints([1, 2, 3])
+    renderer.parse_response.return_value = ({"role": "assistant", "content": "done"}, True)
+    tokenizer = Mock()
+    sample = SimpleNamespace(sequences=[SimpleNamespace(tokens=[7, 8, 9], logprobs=logprobs, stop_reason="stop")])
+    provider = TinkerLLM(
+        model_name="test",
+        renderer=renderer,
+        tokenizer=tokenizer,
+        sampling_client=SimpleNamespace(sample=Mock(return_value=sample)),
+    )
+
+    with TinkerLLMProxySession() as session:
+        response = provider.completion(messages=[{"role": "user", "content": "go"}])
+        interaction = session.interactions[response.id]
+
+    assert interaction.obs.to_ints() == [1, 2, 3]
+    assert interaction.action.tokens == [7, 8, 9]
+    assert interaction.action.maybe_logprobs == (logprobs or [])
+    payload = response.model_dump(mode="json", exclude_none=True)
+    assert "prompt_token_ids" not in payload
+    assert "logprobs" not in payload["choices"][0]
+    tokenizer.batch_decode.assert_not_called()

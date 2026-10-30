@@ -25,14 +25,11 @@ from litellm.exceptions import ContextWindowExceededError
 from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import (
     ChatCompletionMessageToolCall,
-    ChatCompletionTokenLogprob,
     Choices,
     ModelResponse,
     Usage,
 )
-from litellm.types.utils import ChoiceLogprobs as LitellmChoiceLogprobs
 from litellm.types.utils import Message as LitellmMessage
-from litellm.types.utils import TopLogprob as LitellmTopLogprob
 from litellm.utils import custom_llm_setup
 from tinker.types import ModelInput, SampleResponse, SamplingParams
 from tinker_cookbook.completers import TokensWithLogprobs
@@ -314,32 +311,15 @@ class TinkerLLM(CustomLLM):
     def _parse_response(self, model_input: ModelInput, response: SampleResponse) -> ModelResponse:
         """Tinker Response -> LiteLLM Response.
 
-        Extract log probabilities as well.
+        The response carries neither per-token logprobs nor the prompt token ids: no client reads them,
+        and building them per call (two pydantic objects per sampled token, plus the whole prompt) was the
+        main source of allocation churn and full GC pauses in the trainer. Training records the sampled
+        tokens and logprobs from the Tinker response itself (see _record_interaction).
         """
         choices: List[Choices] = []
         completion_token_count = 0
         for seq in response.sequences:
             completion_token_count += len(seq.tokens)
-            if seq.logprobs is not None:
-                token_strings: List[str] = self.tokenizer.batch_decode([[token] for token in seq.tokens])  # type: ignore
-                # FIXME: This might not be accurate for some corner cases.
-                # But it's not actually used in most cases.
-                bytes_list: List[List[int]] = [list(token.encode("utf-8")) for token in token_strings]
-                logprobs = LitellmChoiceLogprobs(
-                    content=[
-                        ChatCompletionTokenLogprob(
-                            token=token,
-                            bytes=bytes,
-                            logprob=logprob,
-                            # NOTE: This top logprob is fake. It's just used to fool the LiteLLM type validator.
-                            top_logprobs=[LitellmTopLogprob(token=token, bytes=bytes, logprob=logprob)],
-                        )
-                        for token, bytes, logprob in zip(token_strings, bytes_list, seq.logprobs)
-                    ]
-                )
-            else:
-                logprobs = None
-
             parsed_response, parse_success = self.renderer.parse_response(seq.tokens)
             if parse_success:
                 role = parsed_response["role"]
@@ -360,7 +340,6 @@ class TinkerLLM(CustomLLM):
                     Choices(
                         message=LitellmMessage(role=role, content=content, tool_calls=tool_calls),
                         finish_reason=finish_reason,
-                        logprobs=logprobs,
                         token_ids=seq.tokens,
                     )
                 )
@@ -374,7 +353,6 @@ class TinkerLLM(CustomLLM):
                             content=self._normalize_message_content(parsed_response["content"]),
                         ),
                         finish_reason=seq.stop_reason,
-                        logprobs=logprobs,
                         token_ids=seq.tokens,
                     )
                 )
@@ -383,7 +361,6 @@ class TinkerLLM(CustomLLM):
             id=generate_id("tinker-sampling-"),
             model=self.model_name,
             choices=choices,
-            prompt_token_ids=model_input.to_ints(),
             usage=Usage(
                 prompt_tokens=prompt_token_count,
                 completion_tokens=completion_token_count,
@@ -391,16 +368,16 @@ class TinkerLLM(CustomLLM):
             ),
         )
 
-    def _record_interaction(self, model_input: ModelInput, model_response: ModelResponse) -> None:
-        assert len(model_response.choices) == 1
-
-        logprobs_content = model_response.choices[0].logprobs.content
+    def _record_interaction(
+        self, model_input: ModelInput, model_response: ModelResponse, response: SampleResponse
+    ) -> None:
+        # Record the sampled tokens and logprobs straight from the Tinker response, keyed by the
+        # completion id the agent sees.
+        assert len(response.sequences) == 1
+        seq = response.sequences[0]
         interaction = TinkerLLMInteraction(
             obs=model_input,
-            action=TokensWithLogprobs(
-                tokens=model_response.choices[0].token_ids,
-                maybe_logprobs=[c.logprob for c in logprobs_content] if logprobs_content else [],
-            ),
+            action=TokensWithLogprobs(tokens=seq.tokens, maybe_logprobs=list(seq.logprobs or [])),
         )
         proxy_interactions.get()[model_response.id] = interaction
 
@@ -462,7 +439,7 @@ class TinkerLLM(CustomLLM):
         if elapsed > 30.0:
             logger.warning(f"sample_async took {elapsed:.1f}s (slow)")
         final_response = await asyncio.to_thread(self._parse_response, model_input, result)
-        self._record_interaction(model_input, final_response)
+        self._record_interaction(model_input, final_response, result)
         return final_response
 
     def completion(self, **kwargs: Any) -> ModelResponse:  # type: ignore
@@ -489,7 +466,7 @@ class TinkerLLM(CustomLLM):
         )
         result = self.sampling_client.sample(prompt=model_input, sampling_params=params, num_samples=1)
         final_response = self._parse_response(model_input, result)
-        self._record_interaction(model_input, final_response)
+        self._record_interaction(model_input, final_response, result)
         return final_response
 
     def as_model_list(self) -> list[dict]:
