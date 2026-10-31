@@ -113,6 +113,9 @@ class DirectoryOverlayWorkspace(ApptainerWorkspace):
         container_opts.append("--no-umask")
         container_opts += ["--overlay", str(overlay_root_dir)]
         container_opts += ["--workdir", str(self._runtime_dir / "workdir")]
+        # The overlay is discarded at cleanup, so bytecode caches are never reused. Writing
+        # them (~4,000 files per agent-server start) contends on scratch in start bursts.
+        container_opts += ["--env", "PYTHONDONTWRITEBYTECODE=1"]
         if self.enable_gpu:
             container_opts.append("--nv")
         if self.disable_mount_locations:

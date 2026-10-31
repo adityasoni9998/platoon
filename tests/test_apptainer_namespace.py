@@ -89,6 +89,8 @@ def test_workspace_uses_cached_mapping_only_for_fakeroot(tmp_path, monkeypatch, 
             assert ("--fakeroot" in command) == use_fakeroot
         assert "--overlay" in command and "--containall" in command
         assert "--net" not in command
+        index = command.index("PYTHONDONTWRITEBYTECODE=1")
+        assert command[index - 1] == "--env"
     finally:
         workspace.cleanup()
 
