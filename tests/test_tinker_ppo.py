@@ -90,6 +90,62 @@ def test_terminal_returns_and_first_action_alignment_across_datums():
     assert original[0].loss_fn_inputs["advantages"].to_torch().tolist() == [0.0, 1.0, 1.0]
 
 
+def test_explained_variance_compares_pre_update_values_with_returns():
+    _, metrics = prepare_batch(
+        [datum(1), datum(0), datum(1)],
+        [
+            {"values": tensor([9.0, 0.8, 0.6])},
+            {"values": tensor([9.0, 0.3, 0.1])},
+            {"values": tensor([9.0, 0.5, 0.9])},
+        ],
+        "batch",
+    )
+    returns = np.array([1.0, 1.0, 0.0, 0.0, 1.0, 1.0])
+    values = np.array([0.8, 0.6, 0.3, 0.1, 0.5, 0.9])
+    expected = 1 - (returns - values).var() / returns.var()
+    assert metrics["critic/explained_variance"] == pytest.approx(expected)
+    # gamma = lambda = 1: the residual is the raw advantage.
+    assert metrics["critic/explained_variance"] == pytest.approx(
+        1 - metrics["critic/raw_advantages_std"] ** 2 / metrics["critic/returns_std"] ** 2, abs=1e-6
+    )
+
+
+@pytest.mark.parametrize("advantage_granularity", ["turn", "token"])
+def test_explained_variance_with_turn_critic_uses_one_value_per_turn(advantage_granularity):
+    # Two turns per trajectory: action blocks at targets [1, 2) and [3, 5); a turn value sits at each block start.
+    rows, outputs = [], []
+    for turn_rewards, turn_values in (([0.2, 0.5], [0.6, 0.4]), ([0.0, -0.1], [0.1, 0.0]), ([0.3, 0.7], [0.8, 0.5])):
+        row = datum()
+        row.loss_fn_inputs.update(
+            target_tokens=tensor([11, 12, 13, 14, 15]),
+            mask=tensor([0.0, 1.0, 0.0, 1.0, 1.0]),
+            logprobs=tensor([0.0, -0.2, 0.0, -0.3, -0.1]),
+            _ppo_turn_range=tensor([0, 1]),
+            _ppo_rewards=tensor(turn_rewards),
+            _ppo_train_turns=tensor([1, 1]),
+        )
+        rows.append(row)
+        outputs.append({"values": tensor([9.0, turn_values[0], 9.0, turn_values[1], 9.0])})
+    _, metrics = prepare_batch(
+        rows, outputs, "batch", value_granularity="turn", advantage_normalization_granularity=advantage_granularity
+    )
+    # gamma = lambda = 1: each turn's return is its reward-to-go.
+    returns = np.array([0.7, 0.5, -0.1, -0.1, 1.0, 0.7])
+    values = np.array([0.6, 0.4, 0.1, 0.0, 0.8, 0.5])
+    assert metrics["critic/explained_variance"] == pytest.approx(1 - (returns - values).var() / returns.var())
+    if advantage_granularity == "turn":  # raw advantages are logged per turn, the critic's positions
+        assert metrics["critic/explained_variance"] == pytest.approx(
+            1 - metrics["critic/raw_advantages_std"] ** 2 / metrics["critic/returns_std"] ** 2, abs=1e-6
+        )
+
+
+def test_explained_variance_is_omitted_when_returns_are_constant():
+    _, metrics = prepare_batch(
+        [datum(1), datum(1)], [{"values": tensor([9.0, 0.2, 0.6])}, {"values": tensor([9.0, 0.4, 0.5])}], "batch"
+    )
+    assert "critic/explained_variance" not in metrics
+
+
 @pytest.mark.parametrize("granularity", [None, "token"])
 def test_whitening_is_global_and_does_not_modify_critic_returns(granularity):
     prepared, _ = prepare_batch(

@@ -179,6 +179,12 @@ def prepare_batch(
         if field == "advantages":
             adv_mean = flat.mean()
             adv_std = flat.std()
+    # Share of return variance the critic's pre-update values explain (1: perfect; <= 0: no better
+    # than predicting the mean). With gamma = lambda = 1 the residual is the raw advantage.
+    returns = np.concatenate([d.returns[d.critic_mask] for d in prepared]).astype(np.float64)
+    values = np.concatenate([d.old_values[d.critic_mask] for d in prepared]).astype(np.float64)
+    if returns.size and returns.var() > 0:
+        metrics["critic/explained_variance"] = (1.0 - (returns - values).var() / returns.var()).item()
     if normalization == "batch":
         for datum in prepared:
             datum.advantages = np.where(
