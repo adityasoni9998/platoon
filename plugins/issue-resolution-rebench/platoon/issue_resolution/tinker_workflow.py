@@ -2,6 +2,7 @@
 
 import asyncio
 import pickle
+import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -52,44 +53,45 @@ class TinkerProxyRollout:
             scratch_dir = workspace.get("apptainer", {}).get("scratch_dir")
             if not scratch_dir:
                 raise ValueError("Apptainer scratch_dir is required for rollout IPC files")
-        with tempfile.TemporaryDirectory(prefix="platoon-rollout-", dir=scratch_dir) as directory:
-            request = Path(directory) / "request.pkl"
-            response = Path(directory) / "response.pkl"
+        directory = Path(tempfile.mkdtemp(prefix="platoon-rollout-", dir=scratch_dir))
+        startup = None
+        try:
+            request = directory / "request.pkl"
+            response = directory / "response.pkl"
             with request.open("wb") as stream:
                 pickle.dump((task, config), stream)
             startup = asyncio.create_task(self._launch_worker(request, response, config))
+            # Shield launch so cancellation cannot lose an already-created child.
+            process = await asyncio.shield(startup)
+            # Allow eight minutes beyond the conversation budget for
+            # setup, reward evaluation, cleanup, and interpreter shutdown.
+            timeout = config.extra.get("subprocess_timeout", (config.timeout or 1800) + 480)
             try:
-                # Shield launch so cancellation cannot lose an already-created child.
-                process = await asyncio.shield(startup)
-                # Allow eight minutes beyond the conversation budget for
-                # setup, reward evaluation, cleanup, and interpreter shutdown.
-                timeout = config.extra.get("subprocess_timeout", (config.timeout or 1800) + 480)
+                await asyncio.wait_for(process.wait(), timeout=timeout)
+            except asyncio.TimeoutError as error:
+                raise TimeoutError(
+                    f"Rollout subprocess for task {task.id} exceeded {timeout}s"
+                ) from error
+            if process.returncode:
+                raise RuntimeError(f"Rollout subprocess exited with code {process.returncode}")
+            # A response can be megabytes of transcript; unpickling it would stall the event loop.
+            result = await asyncio.to_thread(_load_response, response)
+            if not isinstance(result, dict):
+                raise TypeError("Rollout subprocess must return a trajectory dictionary")
+            return result
+        finally:
+            # Repeated cancellation must not release the proxy/session or
+            # delete IPC files while the child is still using them.
+            cleanup = asyncio.create_task(_stop_child_and_remove(startup, directory))
+            cancelled = False
+            while not cleanup.done():
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=timeout)
-                except asyncio.TimeoutError as error:
-                    raise TimeoutError(
-                        f"Rollout subprocess for task {task.id} exceeded {timeout}s"
-                    ) from error
-                if process.returncode:
-                    raise RuntimeError(f"Rollout subprocess exited with code {process.returncode}")
-                with response.open("rb") as stream:
-                    result = pickle.load(stream)
-                if not isinstance(result, dict):
-                    raise TypeError("Rollout subprocess must return a trajectory dictionary")
-                return result
-            finally:
-                # Repeated cancellation must not release the proxy/session or
-                # delete IPC files while the child is still using them.
-                cleanup = asyncio.create_task(_stop_child(startup))
-                cancelled = False
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                cleanup.result()
-                if cancelled:
-                    raise asyncio.CancelledError
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def _launch_worker(self, request: Path, response: Path, config):
         method = config.extra.get("worker_start_method", "exec")
@@ -113,6 +115,24 @@ class TinkerProxyRollout:
 
 
 CHILD_CLEANUP_TIMEOUT = 180
+
+
+def _load_response(path: Path):
+    with path.open("rb") as stream:
+        return pickle.load(stream)
+
+
+async def _stop_child_and_remove(startup, directory: Path):
+    """Stop the child (if one was launched), then delete its IPC directory.
+
+    The directory sits on shared node-local scratch, where deletes can wait on
+    filesystem locks, so it is removed in a worker thread, off the event loop.
+    """
+    try:
+        if startup is not None:
+            await _stop_child(startup)
+    finally:
+        await asyncio.to_thread(shutil.rmtree, directory)
 
 
 async def _stop_child(startup):
