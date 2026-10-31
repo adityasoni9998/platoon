@@ -117,19 +117,22 @@ class GroupRolloutWorkflow:
         # === Track stats BEFORE early returns ===
         # This ensures we track stats even for groups that get filtered out
 
+        # These are a few numbers per rollout, so they stay plain lists: each torch call on the
+        # trainer's event loop releases and re-acquires the GIL, which waits behind the proxy threads.
+
         # Per-trajectory stats (num_steps, num_tokens are tracked per trajectory)
-        num_steps_per_traj = torch.tensor([float(s.num_steps) for s in all_trajectory_stats])
-        num_input_tokens_per_traj = torch.tensor([float(s.num_input_tokens) for s in all_trajectory_stats])
-        num_output_tokens_per_traj = torch.tensor([float(s.num_output_tokens) for s in all_trajectory_stats])
+        num_steps_per_traj = [float(s.num_steps) for s in all_trajectory_stats]
+        num_input_tokens_per_traj = [float(s.num_input_tokens) for s in all_trajectory_stats]
+        num_output_tokens_per_traj = [float(s.num_output_tokens) for s in all_trajectory_stats]
 
         # Per-step averages (useful for understanding step-level characteristics)
         # Avoid division by zero for trajectories with no steps
-        safe_num_steps = torch.clamp(num_steps_per_traj, min=1.0)
-        avg_input_tokens_per_step = num_input_tokens_per_traj / safe_num_steps
-        avg_output_tokens_per_step = num_output_tokens_per_traj / safe_num_steps
+        safe_num_steps = [max(n, 1.0) for n in num_steps_per_traj]
+        avg_input_tokens_per_step = [n / s for n, s in zip(num_input_tokens_per_traj, safe_num_steps)]
+        avg_output_tokens_per_step = [n / s for n, s in zip(num_output_tokens_per_traj, safe_num_steps)]
 
         # Masks for per-trajectory stats
-        trajectory_mask = torch.ones(len(all_trajectory_stats), dtype=torch.bool)
+        trajectory_mask = [True] * len(all_trajectory_stats)
 
         self.tracker.denominator(
             num_output_tokens_mask=trajectory_mask,
@@ -149,27 +152,21 @@ class GroupRolloutWorkflow:
         )
 
         # Per-rollout stats (task_reward is the root trajectory's reward, one per rollout)
-        task_rewards_tensor = torch.tensor(task_rewards)
-        rollout_mask = torch.ones(len(task_rewards), dtype=torch.bool)
+        task_rewards_list = [float(r) for r in task_rewards]
+        rollout_mask = [True] * len(task_rewards_list)
 
         self.tracker.denominator(task_reward_mask=rollout_mask)
-        self.tracker.stat(task_reward=task_rewards_tensor, denominator="task_reward_mask")
+        self.tracker.stat(task_reward=task_rewards_list, denominator="task_reward_mask")
 
         # task_reward @ K metrics (computed per-task across K rollouts)
-        task_reward_at_k_mask = torch.ones(1, dtype=torch.bool)
+        task_reward_at_k_mask = [True]
         self.tracker.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
         self.tracker.stat(
-            task_reward_at_k_mean=torch.mean(task_rewards_tensor).unsqueeze(0),
+            task_reward_at_k_mean=[sum(task_rewards_list) / len(task_rewards_list)],
             denominator="task_reward_at_k_mask",
         )
-        self.tracker.stat(
-            task_reward_at_k_max=torch.max(task_rewards_tensor).unsqueeze(0),
-            denominator="task_reward_at_k_mask",
-        )
-        self.tracker.stat(
-            task_reward_at_k_min=torch.min(task_rewards_tensor).unsqueeze(0),
-            denominator="task_reward_at_k_mask",
-        )
+        self.tracker.stat(task_reward_at_k_max=[max(task_rewards_list)], denominator="task_reward_at_k_mask")
+        self.tracker.stat(task_reward_at_k_min=[min(task_rewards_list)], denominator="task_reward_at_k_mask")
 
         # root_* metrics from reward_processor (per-rollout, from root trajectory only)
         # Collect all reward component keys from the root trajectories
@@ -179,22 +176,15 @@ class GroupRolloutWorkflow:
 
         for key in all_reward_keys:
             # Collect values for this key from all root trajectories (one per rollout)
-            values = torch.tensor([rewards_dict.get(key, 0.0) for rewards_dict in all_root_rewards_dicts])
+            values = [float(rewards_dict.get(key, 0.0)) for rewards_dict in all_root_rewards_dicts]
 
             # Track root_* metrics with rollout mask (same as task_reward)
             self.tracker.stat(**{f"root_{key}": values}, denominator="task_reward_mask")
             self.tracker.stat(
-                **{f"root_{key}_at_k_mean": torch.mean(values).unsqueeze(0)},
-                denominator="task_reward_at_k_mask",
+                **{f"root_{key}_at_k_mean": [sum(values) / len(values)]}, denominator="task_reward_at_k_mask"
             )
-            self.tracker.stat(
-                **{f"root_{key}_at_k_max": torch.max(values).unsqueeze(0)},
-                denominator="task_reward_at_k_mask",
-            )
-            self.tracker.stat(
-                **{f"root_{key}_at_k_min": torch.min(values).unsqueeze(0)},
-                denominator="task_reward_at_k_mask",
-            )
+            self.tracker.stat(**{f"root_{key}_at_k_max": [max(values)]}, denominator="task_reward_at_k_mask")
+            self.tracker.stat(**{f"root_{key}_at_k_min": [min(values)]}, denominator="task_reward_at_k_mask")
 
         # reward/* metrics from per-trajectory rewards_dict (tracked per trajectory)
         all_per_traj_reward_keys: set[str] = set()
@@ -204,8 +194,8 @@ class GroupRolloutWorkflow:
                     all_per_traj_reward_keys.add(key)
 
         for key in all_per_traj_reward_keys:
-            values = torch.tensor([stats.rewards_dict.get(key, 0.0) for stats in all_trajectory_stats])
-            reward_mask = torch.ones_like(values, dtype=torch.bool)
+            values = [float(stats.rewards_dict.get(key, 0.0)) for stats in all_trajectory_stats]
+            reward_mask = [True] * len(values)
             self.tracker.denominator(**{f"{key}_mask": reward_mask})
             self.tracker.stat(**{key: values}, denominator=f"{key}_mask")
 

@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from threading import Lock
 
-import torch
-
 
 class ReduceType(Enum):
     """Reduction types for aggregating statistics."""
@@ -31,8 +29,8 @@ class ReduceType(Enum):
 class StatEntry:
     """A single statistic entry with value and optional denominator."""
 
-    values: list[torch.Tensor | float] = field(default_factory=list)
-    denominators: list[torch.Tensor] = field(default_factory=list)
+    values: list[list | float] = field(default_factory=list)
+    denominators: list[list[bool]] = field(default_factory=list)
     reduce_type: ReduceType = ReduceType.AVG
 
 
@@ -45,10 +43,9 @@ class StatsTracker:
         # Record a scalar
         tracker.scalar(loss=0.5)
 
-        # Record tensor stats with denominator (mask)
-        mask = torch.ones(batch_size, dtype=torch.bool)
-        tracker.denominator(batch_mask=mask)
-        tracker.stat(rewards=reward_tensor, denominator="batch_mask")
+        # Record per-item stats with a denominator (mask): plain lists
+        tracker.denominator(batch_mask=[True] * batch_size)
+        tracker.stat(rewards=rewards, denominator="batch_mask")
 
         # Export aggregated stats
         stats = tracker.export()
@@ -104,36 +101,40 @@ class StatsTracker:
                 entry.values.append(float(value))
                 entry.reduce_type = ReduceType.SCALAR
 
-    def denominator(self, **kwargs: torch.Tensor):
-        """Register denominator masks for subsequent stat calls."""
+    def denominator(self, **kwargs: list[bool]):
+        """Register denominator masks (lists of bools) for subsequent stat calls.
+
+        Plain lists, not torch tensors: these stats are a few numbers per rollout, recorded on the
+        trainer's event loop, where each torch call releases and re-acquires the GIL.
+        """
         with self.lock:
             for key, value in kwargs.items():
-                if not isinstance(value, torch.Tensor) or value.dtype != torch.bool:
-                    raise ValueError(f"`{key}` must be a pytorch bool tensor")
+                if not isinstance(value, list) or not all(isinstance(x, bool) for x in value):
+                    raise ValueError(f"`{key}` must be a list of bools")
                 full_key = self._get_full_key(key)
                 entry = self.stats[full_key]
-                entry.values.append(value.detach().clone())
+                entry.values.append(list(value))
                 entry.reduce_type = ReduceType.SUM
 
     def stat(
         self,
         denominator: str,
         reduce_type: ReduceType | None = None,
-        **kwargs: torch.Tensor,
+        **kwargs: list[float],
     ):
-        """Record tensor statistics with a denominator mask."""
+        """Record statistics (lists of numbers) with a denominator mask."""
         with self.lock:
             denom_key = self._get_full_key(denominator)
             if denom_key not in self.stats:
                 raise ValueError(f"Denominator `{denom_key}` not registered")
 
             for key, value in kwargs.items():
-                if not isinstance(value, torch.Tensor):
-                    raise ValueError(f"`{key}` must be a pytorch tensor")
+                if not isinstance(value, list):
+                    raise ValueError(f"`{key}` must be a list of numbers")
 
                 full_key = self._get_full_key(key)
                 entry = self.stats[full_key]
-                entry.values.append(value.detach().float().clone())
+                entry.values.append([float(x) for x in value])
                 entry.reduce_type = reduce_type or ReduceType.AVG_MIN_MAX
                 self.denominators[full_key] = denom_key
 
@@ -166,9 +167,8 @@ class StatsTracker:
                 result[f"{key}__count"] = len(entry.values)
 
         elif entry.reduce_type == ReduceType.SUM:
-            # Sum of tensor values
-            total = sum(v.sum().item() if isinstance(v, torch.Tensor) else v for v in entry.values)
-            result[key] = total
+            # Sum of masks: the number of True entries
+            result[key] = sum(sum(v) for v in entry.values)
 
         elif entry.reduce_type in (ReduceType.AVG, ReduceType.AVG_MIN_MAX):
             # Weighted average using denominator
@@ -182,16 +182,13 @@ class StatsTracker:
                 maxs = []
 
                 for v, d in zip(entry.values, denom_entry.values):
-                    if isinstance(v, torch.Tensor) and isinstance(d, torch.Tensor):
-                        masked = torch.where(d, v, torch.zeros_like(v))
-                        numerator += masked.sum().item()
-                        denominator += d.sum().item()
+                    valid = [x for x, keep in zip(v, d, strict=True) if keep]
+                    numerator += sum(valid)
+                    denominator += len(valid)
 
-                        if entry.reduce_type == ReduceType.AVG_MIN_MAX:
-                            valid = v[d]
-                            if valid.numel() > 0:
-                                mins.append(valid.min().item())
-                                maxs.append(valid.max().item())
+                    if entry.reduce_type == ReduceType.AVG_MIN_MAX and valid:
+                        mins.append(min(valid))
+                        maxs.append(max(valid))
 
                 if denominator > 0:
                     avg = numerator / denominator
@@ -205,12 +202,12 @@ class StatsTracker:
                         result[key] = avg
 
         elif entry.reduce_type == ReduceType.MIN:
-            mins = [v.min().item() if isinstance(v, torch.Tensor) else v for v in entry.values]
+            mins = [min(v) for v in entry.values]
             if mins:
                 result[key] = min(mins)
 
         elif entry.reduce_type == ReduceType.MAX:
-            maxs = [v.max().item() if isinstance(v, torch.Tensor) else v for v in entry.values]
+            maxs = [max(v) for v in entry.values]
             if maxs:
                 result[key] = max(maxs)
 
