@@ -33,6 +33,7 @@ from platoon.train.tinker.rl import PlatoonTinkerRLTrainer
 from platoon.train.tinker.workflows import GroupRolloutWorkflow
 from platoon.utils.config import load_config
 
+from platoon.issue_resolution.reward_breakdown import reward_breakdown
 from platoon.issue_resolution.rollout import run_rollout
 from platoon.issue_resolution.tasks import get_task, load_data
 from platoon.issue_resolution.tinker_workflow import TinkerProxyRollout, routed_tinker_proxy
@@ -86,6 +87,7 @@ async def train(trainer, rollout_fn):
             log_path=trainer.run_log_path,
             stats_scope="train",
             filter_errors=False,
+            reward_processor=reward_breakdown,
         )
         try:
             await trainer.train(train_workflow=train_workflow, eval_workflow=None)

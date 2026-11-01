@@ -348,6 +348,35 @@ def test_per_step_settlement(monkeypatch, scores, expected):
     assert sum(reward for reward, _ in result) == pytest.approx(.30 * scores[-1][0] + .70 * scores[-1][1])
 
 
+def test_reward_breakdown_reads_the_env_turn_info(monkeypatch):
+    from platoon.issue_resolution.reward_breakdown import reward_breakdown
+
+    env = turn_env(monkeypatch)
+    snapshots = [
+        {'localization_reward': .2, 'composite_reward': .3},
+        {'localization_reward': .5, 'composite_reward': .8, 'binary_reward': 0.0, 'f2p_pass_fraction': .75,
+         'p2p_fail_fraction': .1,
+         'localization': {'file_f1_reward': .9, 'module_f1_reward': .4, 'entity_f1_reward': .2}},
+    ]
+    steps = []
+    for i, scores in enumerate(snapshots):
+        env._snapshot_scores[str(i)] = scores
+        env._completion_snapshots[str(i)] = str(i)
+        env._current_step = OpenHandsTrajectoryStep(misc={'action_misc': {'completion_id': str(i)}})
+        env._state.final = i == len(snapshots) - 1
+        reward, info = asyncio.run(env.evaluate())
+        steps.append({'misc': {'reward_misc': info}, 'reward': reward})
+    total = sum(step['reward'] for step in steps)
+    reward, metrics = reward_breakdown({'reward': total, 'steps': steps})
+    assert reward == total
+    assert metrics == pytest.approx({
+        'reward/final/localization_reward': .5, 'reward/final/test_reward': .8,
+        'reward/final/binary_reward': 0.0, 'reward/final/f2p_pass_rate': .75, 'reward/final/p2p_pass_rate': .9,
+        'reward/final/file_f1': .9, 'reward/final/module_f1': .4, 'reward/final/function_f1': .2,
+        'reward/tool_json_penalty': 0.0, 'reward/agent_error_penalty': 0.0, 'reward/file_editor_penalty': 0.0,
+    })
+
+
 def test_no_hook_inherits_previous_state_and_format_penalties_are_per_category(monkeypatch):
     env = turn_env(monkeypatch)
     env._previous_patch_hash = 'edited'
