@@ -18,6 +18,8 @@ from platoon.envs.base import Task
 from platoon.train.tinker.batch_transforms import TRAINABLE_DATUM_KEY
 from platoon.train.tinker.config_defs import RolloutConfig, WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo, TinkerLLMProxySession
+from platoon.train.tinker.workflows.base import RolloutDatums
+from platoon.utils.stats_tracker import DeferredStats
 from platoon.utils.stats_tracker import get as get_tracker
 from platoon.utils.tinker_data_processing import (
     TrajectoryCollectionResult,
@@ -93,7 +95,8 @@ class GroupRolloutWorkflow:
             data: Dictionary containing 'task_id' and optionally other task data.
 
         Returns:
-            List of tinker.Datum with group-centered advantages, or None if no data.
+            The group's datums (with group-centered advantages for GRPO) carrying the group's
+            statistics for the step that trains them to record, or None if no data.
         """
         results = await asyncio.gather(*[self.arun_episode_single(data, i) for i in range(self.config.group_size)])
         valid_results = [result for result in results if result is not None]
@@ -114,8 +117,10 @@ class GroupRolloutWorkflow:
             logger.warning(f"No results found for task {data['task_id']}")
             return None
 
-        # === Track stats BEFORE early returns ===
-        # This ensures we track stats even for groups that get filtered out
+        # === Collect stats BEFORE early returns ===
+        # The step that trains this group records them (RolloutDatums); a group filtered out
+        # here never trains, so its stats are recorded now instead.
+        group_stats = DeferredStats()
 
         # These are a few numbers per rollout, so they stay plain lists: each torch call on the
         # trainer's event loop releases and re-acquires the GIL, which waits behind the proxy threads.
@@ -134,20 +139,20 @@ class GroupRolloutWorkflow:
         # Masks for per-trajectory stats
         trajectory_mask = [True] * len(all_trajectory_stats)
 
-        self.tracker.denominator(
+        group_stats.denominator(
             num_output_tokens_mask=trajectory_mask,
             num_input_tokens_mask=trajectory_mask,
             num_steps_mask=trajectory_mask,
             avg_input_tokens_per_step_mask=trajectory_mask,
             avg_output_tokens_per_step_mask=trajectory_mask,
         )
-        self.tracker.stat(num_output_tokens=num_output_tokens_per_traj, denominator="num_output_tokens_mask")
-        self.tracker.stat(num_input_tokens=num_input_tokens_per_traj, denominator="num_input_tokens_mask")
-        self.tracker.stat(num_steps=num_steps_per_traj, denominator="num_steps_mask")
-        self.tracker.stat(
+        group_stats.stat(num_output_tokens=num_output_tokens_per_traj, denominator="num_output_tokens_mask")
+        group_stats.stat(num_input_tokens=num_input_tokens_per_traj, denominator="num_input_tokens_mask")
+        group_stats.stat(num_steps=num_steps_per_traj, denominator="num_steps_mask")
+        group_stats.stat(
             avg_input_tokens_per_step=avg_input_tokens_per_step, denominator="avg_input_tokens_per_step_mask"
         )
-        self.tracker.stat(
+        group_stats.stat(
             avg_output_tokens_per_step=avg_output_tokens_per_step, denominator="avg_output_tokens_per_step_mask"
         )
 
@@ -155,18 +160,18 @@ class GroupRolloutWorkflow:
         task_rewards_list = [float(r) for r in task_rewards]
         rollout_mask = [True] * len(task_rewards_list)
 
-        self.tracker.denominator(task_reward_mask=rollout_mask)
-        self.tracker.stat(task_reward=task_rewards_list, denominator="task_reward_mask")
+        group_stats.denominator(task_reward_mask=rollout_mask)
+        group_stats.stat(task_reward=task_rewards_list, denominator="task_reward_mask")
 
         # task_reward @ K metrics (computed per-task across K rollouts)
         task_reward_at_k_mask = [True]
-        self.tracker.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
-        self.tracker.stat(
+        group_stats.denominator(task_reward_at_k_mask=task_reward_at_k_mask)
+        group_stats.stat(
             task_reward_at_k_mean=[sum(task_rewards_list) / len(task_rewards_list)],
             denominator="task_reward_at_k_mask",
         )
-        self.tracker.stat(task_reward_at_k_max=[max(task_rewards_list)], denominator="task_reward_at_k_mask")
-        self.tracker.stat(task_reward_at_k_min=[min(task_rewards_list)], denominator="task_reward_at_k_mask")
+        group_stats.stat(task_reward_at_k_max=[max(task_rewards_list)], denominator="task_reward_at_k_mask")
+        group_stats.stat(task_reward_at_k_min=[min(task_rewards_list)], denominator="task_reward_at_k_mask")
 
         # root_* metrics from reward_processor (per-rollout, from root trajectory only)
         # Collect all reward component keys from the root trajectories
@@ -179,12 +184,12 @@ class GroupRolloutWorkflow:
             values = [float(rewards_dict.get(key, 0.0)) for rewards_dict in all_root_rewards_dicts]
 
             # Track root_* metrics with rollout mask (same as task_reward)
-            self.tracker.stat(**{f"root_{key}": values}, denominator="task_reward_mask")
-            self.tracker.stat(
+            group_stats.stat(**{f"root_{key}": values}, denominator="task_reward_mask")
+            group_stats.stat(
                 **{f"root_{key}_at_k_mean": [sum(values) / len(values)]}, denominator="task_reward_at_k_mask"
             )
-            self.tracker.stat(**{f"root_{key}_at_k_max": [max(values)]}, denominator="task_reward_at_k_mask")
-            self.tracker.stat(**{f"root_{key}_at_k_min": [min(values)]}, denominator="task_reward_at_k_mask")
+            group_stats.stat(**{f"root_{key}_at_k_max": [max(values)]}, denominator="task_reward_at_k_mask")
+            group_stats.stat(**{f"root_{key}_at_k_min": [min(values)]}, denominator="task_reward_at_k_mask")
 
         # reward/* metrics from per-trajectory rewards_dict (tracked per trajectory)
         all_per_traj_reward_keys: set[str] = set()
@@ -196,15 +201,15 @@ class GroupRolloutWorkflow:
         for key in all_per_traj_reward_keys:
             values = [float(stats.rewards_dict.get(key, 0.0)) for stats in all_trajectory_stats]
             reward_mask = [True] * len(values)
-            self.tracker.denominator(**{f"{key}_mask": reward_mask})
-            self.tracker.stat(**{key: values}, denominator=f"{key}_mask")
+            group_stats.denominator(**{f"{key}_mask": reward_mask})
+            group_stats.stat(**{key: values}, denominator=f"{key}_mask")
 
         # === Now compute advantages and filter ===
 
         if self.config.algorithm == "ppo":
             # Keep all reward groups. The trainer computes GAE from per-turn
             # rewards and critic predictions, across any prefix splits.
-            return all_data
+            return RolloutDatums(all_data, group_stats)
 
         # Compute group-centered advantages
         mean_task_reward = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
@@ -212,9 +217,10 @@ class GroupRolloutWorkflow:
         # Check if all rewards are the same across ALL trajectories in the group, including subagent trajectories
         all_trajectory_rewards = [stats.reward for stats in all_trajectory_stats]
         if len(all_trajectory_rewards) > 1 and max(all_trajectory_rewards) == min(all_trajectory_rewards):
-            self.tracker.scalar(zero_variance_reward_group=1.0)
+            group_stats.scalar(zero_variance_reward_group=1.0)
             logger.debug(f"All rewards are the same for task {data['task_id']}: {mean_task_reward:.2f}")
             if self.config.filter_zero_variance_groups:
+                group_stats.record(self.tracker)
                 return None
             logger.debug(f"Keeping zero-advantage datums for task {data['task_id']}")
             for datum in all_data:
@@ -237,7 +243,7 @@ class GroupRolloutWorkflow:
                 new_advantages = torch.where(mask > 0, old_advantages - baseline, old_advantages)
                 datum.loss_fn_inputs["advantages"] = TensorData.from_torch(new_advantages)
 
-        return all_data
+        return RolloutDatums(all_data, group_stats)
 
     async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> TrajectoryCollectionResult | None:
         """Run a single rollout and return training data.

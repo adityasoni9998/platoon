@@ -214,6 +214,35 @@ class StatsTracker:
         return result
 
 
+class DeferredStats:
+    """Stat calls kept now and recorded into a tracker later, with the same arguments.
+
+    A rollout's statistics belong to the step that trains it, not to the step during which it
+    happened to finish: with rollouts running ahead, some finish during one step and train in the next.
+    """
+
+    def __init__(self):
+        self._calls: list[tuple[str, tuple, dict]] = []
+
+    def denominator(self, **kwargs: list[bool]):
+        self._calls.append(("denominator", (), kwargs))
+
+    def stat(self, denominator: str, reduce_type: ReduceType | None = None, **kwargs: list[float]):
+        self._calls.append(("stat", (denominator, reduce_type), kwargs))
+
+    def scalar(self, **kwargs: float):
+        self._calls.append(("scalar", (), kwargs))
+
+    def record(self, tracker: StatsTracker, prefix: str = ""):
+        """Replay the calls; ``prefix`` (e.g. "stale/") renames every key and denominator."""
+        for method, args, kwargs in self._calls:
+            kwargs = {prefix + key: value for key, value in kwargs.items()}
+            if method == "stat":
+                denominator, reduce_type = args
+                args = (prefix + denominator, reduce_type)
+            getattr(tracker, method)(*args, **kwargs)
+
+
 # Global trackers registry
 _TRACKERS: dict[str, StatsTracker] = {}
 _LOCK = Lock()

@@ -2,7 +2,7 @@
 
 import pytest
 
-from platoon.utils.stats_tracker import ReduceType, StatsTracker
+from platoon.utils.stats_tracker import DeferredStats, ReduceType, StatsTracker
 
 # One entry per recorded call (e.g. per rollout): (values, mask)
 CALLS = [
@@ -50,3 +50,21 @@ def test_values_must_be_a_list_and_match_the_mask():
     tracker.stat(x=[1.0], denominator="m")
     with pytest.raises(ValueError):
         tracker.export()
+
+
+def test_deferred_stats_replay_later_and_can_be_prefixed():
+    deferred = DeferredStats()
+    deferred.denominator(x_mask=[True, False])
+    deferred.stat(x=[2.0, 9.0], denominator="x_mask")
+    deferred.stat(x_min=[2.0, 9.0], denominator="x_mask", reduce_type=ReduceType.MIN)
+    deferred.scalar(n=1.0)
+    tracker = StatsTracker("train")
+    assert tracker.export() == {}  # nothing until replayed
+    deferred.record(tracker)
+    deferred.record(tracker, prefix="stale/")
+    stats = tracker.export()
+    for prefix in ("", "stale/"):
+        assert stats[f"train/{prefix}x/avg"] == 2.0
+        assert stats[f"train/{prefix}x_mask"] == 1
+        assert stats[f"train/{prefix}x_min"] == 2.0
+        assert stats[f"train/{prefix}n"] == 1.0

@@ -29,7 +29,7 @@ from platoon.train.tinker.config_defs import (
     TrainEventTriggerConfig,
 )
 from platoon.train.tinker.proxy import ModelInfo, register_tinker_llm
-from platoon.train.tinker.workflows.base import RolloutWorkflow
+from platoon.train.tinker.workflows.base import RolloutWorkflow, record_stats
 from platoon.utils.stats_logger import StatsLogger
 from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.stats_tracker import get as get_tracker
@@ -638,6 +638,8 @@ class PlatoonTinkerRLTrainer:
                                     f"Stale rollout detected in batch {shared_state.train_step}. Filtering out."
                                 )
                                 shared_state.train_tracker.scalar(stale_rollouts=1.0)
+                                # Kept apart from the trained rollouts' metrics: what staleness drops.
+                                record_stats(rollout, shared_state.train_tracker, prefix="stale/")
                                 rollout = None
 
                         # Spend at most K extra queue reads across the whole batch to replace
@@ -651,6 +653,9 @@ class PlatoonTinkerRLTrainer:
                             task_rollout_results.extend(rollout)
                             total_datums += len(rollout)
                             accepted_groups += 1
+                            # Its own statistics land in the step that trains it. Stale results record
+                            # theirs under stale/ above; failed and empty results have none.
+                            record_stats(rollout, shared_state.train_tracker)
 
                     if len(task_rollout_results) == 0:
                         logger.warning(f"No rollouts found for microbatch {microbatch_num} (minibatch {minibatch_num})")
@@ -949,10 +954,12 @@ class PlatoonTinkerRLTrainer:
         self,
         total_eval_tasks: int,
         eval_rollout_result_queue: asyncio.Queue[list[tinker.Datum | None]],
+        eval_tracker: StatsTracker,
     ):
-        """Monitor task that waits for all eval results and then terminates the eval TaskGroup."""
+        """Monitor task that waits for all eval results, records their statistics, and then terminates
+        the eval TaskGroup."""
         for _ in range(total_eval_tasks):
-            await eval_rollout_result_queue.get()
+            record_stats(await eval_rollout_result_queue.get(), eval_tracker)
         raise TerminateEvalLoop()
 
     async def _eval_loop(self, shared_state: TrainLoopSharedState, workflow: RolloutWorkflow):
@@ -1002,7 +1009,7 @@ class PlatoonTinkerRLTrainer:
                             )
                         # Spawn completion monitor
                         tg.create_task(
-                            self._eval_completion_monitor(total_eval_tasks, eval_rollout_result_queue),
+                            self._eval_completion_monitor(total_eval_tasks, eval_rollout_result_queue, eval_tracker),
                             name="eval_completion_monitor",
                         )
                 except* TerminateEvalLoop:

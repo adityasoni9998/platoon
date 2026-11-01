@@ -32,8 +32,9 @@ from platoon.train.tinker.ppo import (
     save_pair,
     update_batch,
 )
+from platoon.train.tinker.workflows.base import RolloutDatums, record_stats
 from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow
-from platoon.utils.stats_tracker import StatsTracker
+from platoon.utils.stats_tracker import DeferredStats, StatsTracker
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
 
@@ -306,6 +307,31 @@ async def test_ppo_retains_equal_reward_groups_and_grpo_still_filters(algorithm,
     else:
         assert len(result) == group_size
         assert all(d.loss_fn_inputs["_ppo_rewards"].to_torch().tolist() == [1.0] for d in result)
+
+
+@pytest.mark.asyncio
+async def test_group_stats_wait_for_the_step_that_trains_the_group():
+    workflow = GroupRolloutWorkflow.__new__(GroupRolloutWorkflow)
+    workflow.config = WorkflowConfig(algorithm="ppo", group_size=2)
+    workflow.tracker = StatsTracker("train")
+
+    async def episode(data, index):
+        return TrajectoryCollectionResult(
+            datums=[datum(index)],
+            task_reward=float(index),
+            root_rewards_dict={},
+            trajectory_stats=[TrajectoryStats(str(index), float(index), 1, 2, 2, 1, is_root=True)],
+        )
+
+    workflow.arun_episode_single = episode
+    result = await workflow.arun_episode({"task_id": "task"})
+    assert isinstance(result, RolloutDatums) and len(result) == 2
+    assert workflow.tracker.export() == {}  # nothing is recorded when the group finishes
+    record_stats(result, workflow.tracker)
+    stats = workflow.tracker.export()
+    assert stats["train/task_reward_mask"] == 2
+    assert stats["train/task_reward/avg"] == pytest.approx(0.5)
+    assert stats["train/num_steps_mask"] == 2
 
 
 def test_real_prefix_conversion_keeps_observations_masked_and_terminal_targets():
@@ -1131,6 +1157,49 @@ async def test_extra_groups_replace_ineligible_results(tmp_path, monkeypatch, ba
     await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
     assert len(critic.frozen[0]) == 1 + extra_groups
     assert trainer.records[0]["stats"]["train/total_datums_per_batch"] == 1 + extra_groups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_result", ["failed", "empty", "stale"])
+async def test_rollout_stats_cover_exactly_the_rollouts_a_step_trains(tmp_path, monkeypatch, bad_result):
+    cfg = config(extra_rollout_groups=1, max_staleness=1)
+    cfg.train.max_training_steps = 1
+    cfg.train.ppo.critic_warmup_batches = 0
+    actor, critic, _ = clients()
+    install_clients(monkeypatch, actor, critic)
+    trainer = make_trainer(tmp_path, cfg)
+
+    class Workflow:
+        started = 0
+
+        async def arun_episode(self, task):
+            self.started += 1
+            if self.started == 1 and bad_result == "failed":
+                raise RuntimeError("test rollout failure")
+            reward = 10.0 if self.started == 1 else float(self.started)
+            stats = DeferredStats()
+            stats.denominator(task_reward_mask=[True])
+            stats.stat(task_reward=[reward], denominator="task_reward_mask")
+            if self.started == 1 and bad_result == "empty":
+                return RolloutDatums([], stats)
+            row = datum()
+            # At step 0, version -1 is eligible; version -2 is stale.
+            row.loss_fn_inputs["checkpoint_version"] = tensor([-2 if self.started == 1 else -1])
+            return RolloutDatums([row], stats)
+
+    await asyncio.wait_for(trainer.train(Workflow()), timeout=10)
+    stats = trainer.records[0]["stats"]
+    trained = cfg.train.batch_size
+    assert len(critic.frozen[0]) == trained
+    # Only the trained rollouts' rewards count: never the failed, empty or stale first result (reward 10).
+    assert stats["train/task_reward_mask"] == trained
+    assert stats["train/task_reward/max"] < 10.0
+    # A stale result's own stats are kept apart, under stale/.
+    if bad_result == "stale":
+        assert stats["train/stale/task_reward_mask"] == 1
+        assert stats["train/stale/task_reward/avg"] == 10.0
+    else:
+        assert not any(key.startswith("train/stale/") for key in stats)
 
 
 @pytest.mark.asyncio
