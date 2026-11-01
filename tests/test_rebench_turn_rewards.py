@@ -373,7 +373,7 @@ def test_reward_breakdown_reads_the_env_turn_info(monkeypatch):
         'reward/final/localization_reward': .5, 'reward/final/test_reward': .8,
         'reward/final/binary_reward': 0.0, 'reward/final/f2p_pass_rate': .75, 'reward/final/p2p_pass_rate': .9,
         'reward/final/file_f1': .9, 'reward/final/module_f1': .4, 'reward/final/function_f1': .2,
-        'reward/tool_json_penalty': 0.0, 'reward/agent_error_penalty': 0.0, 'reward/file_editor_penalty': 0.0,
+        'reward/file_editor_clean_turn_frac': 1.0, 'reward/agent_error_clean_turn_frac': 1.0, 'reward/tool_json_clean': 1.0,
     })
 
 
