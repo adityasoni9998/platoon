@@ -1,0 +1,110 @@
+# CISPO actor with a turn-level critic, trained on the binary outcome reward only:
+# 1 when the final patch resolves the task, else 0. No localization reward, no tool penalties.
+# Otherwise identical to train_issue_resolution_ppo_tinker.yaml (the turn-reward setup).
+# With gamma=lambda=1, every turn's return is the final outcome.
+# Match CodeScout: K=4, critic LR=5e-6, beta2=.95 and weight_decay=.017 for both models.
+# Requires a full-parameter Miles-Tinker server with --tinker-enable-critic and a fresh critic
+# (no --critic-load); leave client checkpoint loading disabled.
+# batch_size counts tasks: 512 tasks x 1 rollout = up to 512 trajectories/batch.
+# 512 concurrent group workers preserve the previous rollout concurrency.
+train:
+  algorithm: ppo
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 65000
+  batch_size: 512
+  extra_rollout_groups: 0
+  rollout_tail_tolerance_pct: 0.0  # Wait for all 512 slots: stale results that fill tail slots ratchet the stale count up.
+  num_epochs: null  # Use the 500-step budget instead of an epoch limit.
+  max_training_steps: 500
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 1
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  ppo:
+    value_granularity: turn
+    reward_mode: terminal  # Binary rewards are outcome-only; the env rejects them with turn rewards.
+    advantage_normalization_granularity: turn
+    # gamma=lambda=1 gives undiscounted reward-to-go, including final settlement.
+    gamma: 1.0
+    gae_lambda: 1.0
+    advantage_normalization: batch
+    actor_epochs: 1
+    critic_epochs: 1
+    critic_warmup_batches: 12  # One loader epoch: floor(6542 / 512), with drop_last=True.
+    # K=4 gives 48 critic optimizer updates across those 12 warmup batches.
+    critic:
+      value_clip: 0.2
+      num_minibatches: 4
+      num_microbatches: 1
+      optimizer:
+        learning_rate: 5.0e-6
+        beta1: 0.9
+        beta2: 0.95
+        eps: 1.0e-8
+        weight_decay: 0.017
+        grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 1
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 40
+      verbose: true
+      train: true
+      timeout: 1800
+      step_timeout: 600
+      extra:
+        worker_start_method: forkserver  # exec retains the fresh-interpreter launcher.
+        workspace:
+          type: apptainer
+          apptainer:
+            sif_dir: /groups/gai51740/aci19058gb/apptainer/sif
+            cache_dir: /groups/gai51740/aci19058gb/apptainer/cache/apptainer
+            scratch_dir: null  # Required CLI override: current allocation's node-local scratch.
+        max_input_tokens: 62952
+        use_binary_reward: true
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 2048
+  num_concurrent_rollout_workflow_workers: 512
+
+eval:
+  strategy: none
+
+checkpoint:
+  strategy: step
+  # Counts trainer batches, including the 12 critic-only warmup batches.
+  # The first scheduled save is during critic warmup.
+  every: 10
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+log_path: /groups/gai51740/aci19058gb/miles_hyperion
+tinker_base_url: null  # Set --tinker_base_url at launch.
+
+stats:
+  experiment_name: issue-resolution-rebench-tinker
+  trial_name: null  # Set --stats.trial_name at launch.
+  wandb:
+    mode: online
+    project: issue_resolution-miles
+    entity: null
+    tags: [issue_resolution, swe_rebench, tinker, cispo, critic, k4, turn_critic, binary_reward]
+
+inference_tunnel:
+  backend: none
