@@ -36,6 +36,16 @@ from platoon.issue_resolution.workspace import WorkspaceConfig
 
 logger = get_logger(__name__)
 
+# The SWE-rebench harness image activates the testbed environment from /root/.bashrc,
+# but Apptainer's --containall gives the agent server an empty home, so the terminal
+# tool's interactive bash (it reads only ~/.bashrc) would start in conda base. Restore
+# the activation, using the harness's lookup order for conda.sh.
+ACTIVATE_TESTBED = (
+    "if [ -f /opt/conda/etc/profile.d/conda.sh ]; then source /opt/conda/etc/profile.d/conda.sh; "
+    "elif [ -f /opt/miniconda3/etc/profile.d/conda.sh ]; then source /opt/miniconda3/etc/profile.d/conda.sh; fi\n"
+    "conda activate testbed\n"
+)
+
 
 def _optional_env(name: str) -> str | None:
     value = os.environ.get(name)
@@ -96,6 +106,12 @@ def prepare_workspace(
             )
             if clean.exit_code != 0:
                 raise RuntimeError(f"Testbed cleanup failed: {clean.stderr}")
+            activate = workspace.execute_command(
+                f"cat >> ~/.bashrc <<'EOF'\n{ACTIVATE_TESTBED}EOF", timeout=60,
+            )
+            if activate.exit_code != 0:
+                # The agent can still activate the environment itself, as the prompt describes.
+                logger.warning("Could not pre-activate testbed for %s: %s", instance_id, activate.stderr)
 
             instance["repo_path"] = repo_path
             hook_config = install_capture_hook(workspace, instance) if turn_rewards else None
