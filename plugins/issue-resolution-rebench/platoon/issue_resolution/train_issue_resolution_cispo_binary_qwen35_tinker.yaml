@@ -1,0 +1,84 @@
+# Critic-free CISPO for Qwen3.5-4B with reasoning disabled, trained on the binary outcome reward:
+# 1 when the final patch resolves the task, else 0.
+# Otherwise matches train_issue_resolution_ppo_binary_tinker.yaml (Apptainer workspaces, timeouts, optimizer).
+# Server: ~/multi_node_rebench_qwen35_cispo_2nodes_expseg_freezevision.pbs (no critic; 8 train + 8 inference GPUs).
+# batch_size counts tasks: 32 tasks x 8 rollouts = 256 trajectories/batch.
+train:
+  algorithm: grpo  # Group-relative advantages; no critic.
+  model_name: Qwen/Qwen3.5-4B
+  renderer_name: qwen3_5_disable_thinking_preserve_prefix
+  context_window_length: 65000
+  batch_size: 32
+  extra_rollout_groups: 0
+  rollout_tail_tolerance_pct: 0.0
+  num_epochs: null
+  max_training_steps: 500
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 3
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 8
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 75
+      verbose: true
+      train: true
+      timeout: 1800
+      step_timeout: 600
+      extra:
+        worker_start_method: forkserver
+        workspace:
+          type: apptainer
+          apptainer:
+            sif_dir: /groups/gai51740/aci19058gb/apptainer/sif
+            cache_dir: /groups/gai51740/aci19058gb/apptainer/cache/apptainer
+            scratch_dir: null  # Required CLI override: current allocation's node-local scratch.
+            block_github: true  # Block GitHub hosts so the agent cannot fetch the upstream fix.
+          clean_git_history: true  # Drop origin refs and commits after base_commit from /testbed.
+        max_input_tokens: 60904  # 65000 - 4096
+        use_binary_reward: true
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 4096
+  # Counts task workflows; each launches group_size rollouts (256 concurrent rollouts).
+  num_concurrent_rollout_workflow_workers: 32
+
+eval:
+  strategy: none
+
+checkpoint:
+  strategy: step
+  every: 10
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+log_path: /groups/gai51740/aci19058gb/miles_hyperion
+tinker_base_url: null  # Set --tinker_base_url at launch.
+
+stats:
+  experiment_name: issue-resolution-rebench-tinker
+  trial_name: null  # Set --stats.trial_name at launch.
+  wandb:
+    mode: online
+    project: issue_resolution-miles
+    entity: null
+    tags: [issue_resolution, swe_rebench, tinker, cispo, qwen3.5-4b, no_think, binary_reward]
+
+inference_tunnel:
+  backend: none

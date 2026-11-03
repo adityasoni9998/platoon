@@ -25,6 +25,8 @@ class DirectoryOverlayWorkspace(ApptainerWorkspace):
 
     scratch_dir: str
     server_command: list[str] = Field(default_factory=list)
+    # Host names resolved to an unroutable address inside the container (opt-in; loopback is unaffected).
+    blocked_hosts: list[str] = Field(default_factory=list)
     cleaned_up: bool = Field(default=False, exclude=True)
     _runtime_dir: Path | None = PrivateAttr(default=None)
     _port_claim: socket.socket | None = PrivateAttr(default=None)
@@ -83,6 +85,15 @@ class DirectoryOverlayWorkspace(ApptainerWorkspace):
         # Prepare bind mounts
         # Prebuilt SIFs can contain an empty resolver file.
         bind_args: list[str] = ["--bind", "/etc/resolv.conf:/etc/resolv.conf:ro"]
+        if self.blocked_hosts:
+            try:
+                base_hosts = Path("/etc/hosts").read_text()
+            except OSError:
+                base_hosts = "127.0.0.1 localhost\n::1 localhost\n"
+            blocked = "".join(f"0.0.0.0 {h}\n:: {h}\n" for h in self.blocked_hosts)
+            hosts_file = self._runtime_dir / "hosts"
+            hosts_file.write_text(base_hosts.rstrip("\n") + "\n" + blocked)
+            bind_args += ["--bind", f"{hosts_file}:/etc/hosts:ro"]
         if self.mount_dir:
             mount_path = "/workspace"
             bind_args += ["--bind", f"{self.mount_dir}:{mount_path}"]

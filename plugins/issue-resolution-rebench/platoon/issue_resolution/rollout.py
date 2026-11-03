@@ -79,6 +79,20 @@ def _modal_workspace(instance: dict, *, rollout_timeout: int = 1800) -> ModalWor
     )
 
 
+# The prebuilt images keep the full upstream clone (origin/* refs with commits after base_commit, which can
+# include the fix). Keep only the checked-out branch and base_commit, then prune everything else.
+HISTORY_CLEANUP = """
+git remote remove origin 2>/dev/null || true
+git merge-base --is-ancestor {base} HEAD 2>/dev/null || git update-ref refs/platoon/base {base}
+keep=$(git symbolic-ref -q HEAD || true)
+git for-each-ref --format='delete %(refname)' | grep -vxF -e "delete $keep" -e 'delete refs/platoon/base' | git update-ref --stdin
+rm -f .git/FETCH_HEAD .git/ORIG_HEAD .git/MERGE_HEAD
+git reflog expire --expire=now --all
+git gc --prune=now --quiet
+git rev-list --all --not HEAD {base} | wc -l
+"""
+
+
 def prepare_workspace(
     instance: dict, *, rollout_timeout: int = 1800, turn_rewards: bool = False,
     workspace_config: dict | None = None,
@@ -106,6 +120,16 @@ def prepare_workspace(
             )
             if clean.exit_code != 0:
                 raise RuntimeError(f"Testbed cleanup failed: {clean.stderr}")
+            if config.clean_git_history:
+                history = workspace.execute_command(
+                    f"cd {quoted_repo_path} && " + HISTORY_CLEANUP.format(base=shlex.quote(str(instance["base_commit"]))),
+                    timeout=600,
+                )
+                out = getattr(history, "stdout", "") or ""
+                left = out.strip().splitlines()[-1:]
+                if history.exit_code != 0 or left != ["0"]:
+                    logger.warning("Git history cleanup incomplete for %s (exit %s, extra commits %s): %s",
+                                   instance_id, history.exit_code, left, getattr(history, "stderr", ""))
             activate = workspace.execute_command(
                 f"cat >> ~/.bashrc <<'EOF'\n{ACTIVATE_TESTBED}EOF", timeout=60,
             )

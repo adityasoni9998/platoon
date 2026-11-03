@@ -6,6 +6,13 @@ from typing import Literal
 from platoon.openhands.apptainer import DirectoryOverlayWorkspace
 from pydantic import BaseModel, ConfigDict, model_validator
 
+# The upstream fix is one fetch away on GitHub; keep the agent from reaching it by name.
+GITHUB_HOSTS = [
+    "github.com", "www.github.com", "api.github.com", "codeload.github.com", "uploads.github.com",
+    "gist.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+    "gist.githubusercontent.com", "github.githubassets.com",
+]
+
 
 class ApptainerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -13,6 +20,7 @@ class ApptainerConfig(BaseModel):
     sif_dir: str
     cache_dir: str
     scratch_dir: str
+    block_github: bool = False
 
     def create_workspace(self, instance: dict) -> DirectoryOverlayWorkspace:
         sif_path = Path(self.sif_dir) / f"{instance['instance_id']}.sif"
@@ -32,6 +40,7 @@ class ApptainerConfig(BaseModel):
             working_dir="/testbed",
             detach_logs=False,
             health_check_timeout=600,
+            blocked_hosts=GITHUB_HOSTS if self.block_github else [],
         )
 
 
@@ -40,6 +49,7 @@ class WorkspaceConfig(BaseModel):
 
     type: Literal["modal", "apptainer"] = "modal"
     apptainer: ApptainerConfig | None = None
+    clean_git_history: bool = False
 
     @model_validator(mode="after")
     def require_apptainer_config(self):
