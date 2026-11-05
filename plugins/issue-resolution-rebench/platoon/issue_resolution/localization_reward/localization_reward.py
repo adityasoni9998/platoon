@@ -1,6 +1,17 @@
 """Local source parsing and file/module/entity F1, without system dependencies."""
 
+import re
+
 from .processing import capture_sources_and_reset, generate_edited_locations_for_patch
+
+# Test files the model edits (e.g. to add regression tests) are not penalized as off-target edits. On
+# SWE-rebench this matches 97.4% of test_patch files and none of the gold (file_changes) source files.
+TEST_PATH = re.compile(r"(^|/)(tests?|testing)/|(^|/)(test_[^/]*|[^/]*_test|conftest|tests)\.py$")
+
+
+def is_test_path(name):
+    # Modules and entities are "path/to/file.py:qualified.name".
+    return bool(TEST_PATH.search(name.split(":", 1)[0]))
 
 
 def parse_edits(file_changes):
@@ -28,8 +39,10 @@ def score_sources(model_patch, before_sources, after_sources, ground_truth):
         raise ValueError(f"Localization processing failed: {result['status']}")
     changes = result["file_changes"]
     predicted = parse_edits(changes)
+    ignored = sorted(name for name in predicted[0] if is_test_path(name))
+    predicted = tuple({name for name in names if not is_test_path(name)} for names in predicted)
     gold = parse_edits(ground_truth)
-    info = {"status": "success", "file_changes": changes}
+    info = {"status": "success", "file_changes": changes, "ignored_test_files": ignored}
     scores = []
     for name, pred, true in zip(("file", "module", "entity"), predicted, gold):
         score = compute_f1_score(pred, true)

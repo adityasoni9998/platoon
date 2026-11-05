@@ -260,7 +260,7 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             error_detail = str(error)
             raise RuntimeError(f"Workspace setup failed for task {task.id}: {error}") from error
 
-        prompt_path = (Path(__file__).parent / "prompts" / USER_PROMPT_FILENAME).resolve()
+        prompt_path = (Path(__file__).parent / "prompts" / config.extra.get("user_prompt", USER_PROMPT_FILENAME)).resolve()
         if not prompt_path.exists():
             raise FileNotFoundError(f"User prompt path {prompt_path} not found")
         prompt_build_start = time.perf_counter()

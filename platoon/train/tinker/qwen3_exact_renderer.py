@@ -192,8 +192,67 @@ class Qwen3InstructExactRenderer(Qwen3InstructRenderer):
         return assistant_message, True
 
 
+_BLOCK_RE = re.compile(r"<think>.*?</think>|<tool_call>.*?</tool_call>", re.DOTALL)
+
+
+class Qwen3ThinkingExactRenderer(Qwen3InstructExactRenderer):
+    """Qwen3 (hybrid thinking) renderer that keeps each turn's reasoning in history as in-context CoT.
+
+    The tool-call, newline and tool-response fixes come from Qwen3InstructExactRenderer. Assistant content is
+    returned as the raw sampled text (``<think>...</think>`` included) up to the first tool call, so history
+    re-renders exactly as sampled and prefix merging holds. Unlike the HF template, earlier turns keep their
+    reasoning.
+    """
+
+    def __init__(self, tokenizer):
+        super().__init__(tokenizer, strip_thinking_from_history=False)
+
+    def parse_response(self, response: list[int]):
+        response = self._normalize_response_tokens(response)
+        raw_message, parse_success = parse_response_for_stop_token(response, self.tokenizer, self._end_message_token)
+        if not parse_success:
+            return raw_message, False
+        message, parse_success = Qwen3InstructRenderer.parse_response(self, response)
+        if not parse_success or message.get("unparsed_tool_calls"):
+            # Malformed tool call: keep the whole raw response as text, as in qwen3_instruct_exact.
+            return raw_message, True
+        raw = raw_message["content"]
+        if message.get("tool_calls"):
+            # Content is the text before the first tool call that is not inside a <think> block;
+            # rendering appends the calls themselves.
+            first_call = next(m.start() for m in _BLOCK_RE.finditer(raw) if m.group(0).startswith("<tool_call>"))
+            raw = raw[:first_call]
+        message["content"] = raw
+        return message, True
+
+
+class Qwen3NoThinkingExactRenderer(Qwen3ThinkingExactRenderer):
+    """Qwen3 (hybrid thinking) renderer with thinking disabled, as HF's enable_thinking=False.
+
+    Every generation is prefilled with the empty ``<think>\n\n</think>\n\n``, so every assistant turn keeps it
+    in its header and history matches what was sampled. HF keeps it only for the turn being generated, which
+    would break prefix merging on every turn.
+    """
+
+    def render_message(self, message, ctx: RenderContext) -> RenderedMessage:
+        rendered = super().render_message(message, ctx)
+        if message["role"] != "assistant":
+            return rendered
+        empty_think = self.tokenizer.encode("<think>\n\n</think>\n\n", add_special_tokens=False)
+        header = tinker.types.EncodedTextChunk(tokens=list(rendered.header.tokens) + empty_think)
+        return RenderedMessage(header=header, output=rendered.output)
+
+
 def register_qwen3_exact_renderer() -> None:
     register_renderer(
         "qwen3_instruct_exact",
         lambda tokenizer, image_processor=None: Qwen3InstructExactRenderer(tokenizer),
+    )
+    register_renderer(
+        "qwen3_thinking_exact",
+        lambda tokenizer, image_processor=None: Qwen3ThinkingExactRenderer(tokenizer),
+    )
+    register_renderer(
+        "qwen3_no_thinking_exact",
+        lambda tokenizer, image_processor=None: Qwen3NoThinkingExactRenderer(tokenizer),
     )
