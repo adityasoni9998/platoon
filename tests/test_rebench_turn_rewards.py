@@ -348,6 +348,25 @@ def test_per_step_settlement(monkeypatch, scores, expected):
     assert sum(reward for reward, _ in result) == pytest.approx(.30 * scores[-1][0] + .70 * scores[-1][1])
 
 
+def test_immediate_regression_penalty_charges_drops_on_their_turn(monkeypatch):
+    env = turn_env(monkeypatch)
+    env._immediate_regression_penalty = True
+    scores = [(.4, .8), (.1, .3), (.4, .8), (.2, .3)]
+    rewards = [reward for reward, _ in evaluate_scores(env, scores)]
+    assert rewards == pytest.approx([.68, -.44, .44, -.41])
+    assert sum(rewards) == pytest.approx(.30 * .2 + .70 * .3)
+
+
+def test_test_run_reward_is_added_on_its_turn(monkeypatch):
+    env = turn_env(monkeypatch)
+    env._test_run_rewards = {'1': .05}
+    env._test_run_details = {'1': {'source_hash': 'h', 'meaningful_test_run': True}}
+    (r0, i0), (r1, i1), (r2, i2) = evaluate_scores(env, [(0, 0), (0, 0), (0, 0)])
+    assert (r0, r1, r2) == pytest.approx((0, .05, 0))
+    assert i0['test_run_reward'] == 0 and 'meaningful_test_run' not in i0
+    assert i1['test_run_reward'] == .05 and i1['meaningful_test_run'] and i1['source_hash'] == 'h'
+
+
 def test_reward_breakdown_reads_the_env_turn_info(monkeypatch):
     from platoon.issue_resolution.reward_breakdown import reward_breakdown
 
@@ -374,6 +393,7 @@ def test_reward_breakdown_reads_the_env_turn_info(monkeypatch):
         'reward/final/binary_reward': 0.0, 'reward/final/f2p_pass_rate': .75, 'reward/final/p2p_pass_rate': .9,
         'reward/final/file_f1': .9, 'reward/final/module_f1': .4, 'reward/final/function_f1': .2,
         'reward/file_editor_clean_turn_frac': 1.0, 'reward/agent_error_clean_turn_frac': 1.0, 'reward/tool_json_clean': 1.0,
+        'reward/test_run_reward': 0.0, 'reward/meaningful_test_turns': 0.0,
     })
 
 
@@ -393,6 +413,26 @@ def test_no_hook_inherits_previous_state_and_format_penalties_are_per_category(m
     reward, info = asyncio.run(env.evaluate())
     assert reward == pytest.approx(-.15)
     assert info['snapshot_unchanged'] and info['localization_delta'] == 0
+    assert info['immediate_reward'] == pytest.approx(-.15)  # the three tool penalties
+
+
+def test_file_editor_penalty_size_is_configurable(monkeypatch):
+    env = turn_env(monkeypatch)
+    env._file_editor_penalty = .01
+    env._previous_patch_hash = 'edited'
+    env._snapshot_scores['edited'] = {'localization_reward': .4, 'composite_reward': .8}
+    env._best_localization, env._best_test = .4, .8
+    env._current_step = OpenHandsTrajectoryStep(
+        misc={'action_misc': {'completion_id': 'message'}},
+        action_events=[MessageEvent(source='agent', llm_response_id='message',
+            llm_message=Message(role='assistant', content=[TextContent(text='<tool_call>bad')]))],
+        observation_events=[AgentErrorEvent(tool_name='terminal', tool_call_id='0', error='bad')]
+        + [ObservationEvent.model_construct(tool_name='file_editor', observation=SimpleNamespace(is_error=True))],
+    )
+    reward, info = asyncio.run(env.evaluate())
+    assert info['file_editor_penalty'] == pytest.approx(-.01)
+    assert info['tool_json_penalty'] == info['agent_error_penalty'] == pytest.approx(-.05)
+    assert reward == pytest.approx(-.11)
 
 
 def test_runtime_error_without_capture_allows_later_recovery(monkeypatch):

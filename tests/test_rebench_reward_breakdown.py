@@ -19,7 +19,8 @@ def turn(**reward_misc):
 PENALTIES = dict(tool_json_penalty=0.0, agent_error_penalty=0.0, file_editor_penalty=0.0)
 KEYS = {f"reward/final/{name}" for name in ("localization_reward", "test_reward", "binary_reward", "f2p_pass_rate",
                                             "p2p_pass_rate", "file_f1", "module_f1", "function_f1")} | {
-    "reward/file_editor_clean_turn_frac", "reward/agent_error_clean_turn_frac", "reward/tool_json_clean"}
+    "reward/file_editor_clean_turn_frac", "reward/agent_error_clean_turn_frac", "reward/tool_json_clean",
+    "reward/test_run_reward", "reward/meaningful_test_turns"}
 DEFAULTS = {key: 0.0 for key in KEYS} | {
     "reward/final/p2p_pass_rate": 1.0, "reward/file_editor_clean_turn_frac": 1.0,
     "reward/agent_error_clean_turn_frac": 1.0, "reward/tool_json_clean": 1.0}
@@ -55,7 +56,19 @@ def test_final_rewards_come_from_the_last_turn_and_tool_formatting_is_unweighted
         "reward/file_editor_clean_turn_frac": 1 / 3,
         "reward/agent_error_clean_turn_frac": 2 / 3,
         "reward/tool_json_clean": 0.0,
+        "reward/test_run_reward": 0.0,
+        "reward/meaningful_test_turns": 0.0,
     })
+
+
+def test_test_run_reward_sums_and_meaningful_test_turns_count():
+    steps = [turn(**PENALTIES, meaningful_test_run=True, test_run_reward=0.0),
+             turn(**PENALTIES, meaningful_test_run=True, test_run_reward=0.05),
+             turn(**PENALTIES, meaningful_test_run=False, test_run_reward=0.0),
+             turn(**PENALTIES, meaningful_test_run=True, test_run_reward=0.05)]
+    _, metrics = reward_breakdown({"reward": 0.1, "steps": steps})
+    assert metrics["reward/test_run_reward"] == pytest.approx(0.1)
+    assert metrics["reward/meaningful_test_turns"] == 3.0
 
 
 def test_tool_formatting_ignores_the_penalty_weight():

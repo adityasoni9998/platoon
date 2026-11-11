@@ -327,6 +327,7 @@ def trajectory_to_data(
         TensorData(data=[uuid.uuid4().int & ((1 << 63) - 1)], dtype="int64", shape=[1]) if ppo_reward_mode else None
     )
     turn_rewards: list[float] = []
+    turn_immediate_rewards: list[float] = []  # each turn's reward_misc["immediate_reward"], part of its reward
     train_turns: list[bool] = []
     turn_start = 0
     turn_count = 0
@@ -341,11 +342,15 @@ def trajectory_to_data(
                 _ppo_trajectory_id=ppo_id,
                 _ppo_turn_range=TensorData.from_torch(torch.tensor([turn_start, turn_count - 1])),
                 _ppo_rewards=TensorData.from_torch(torch.tensor(turn_rewards, dtype=torch.float32)),
+                _ppo_immediate_rewards=TensorData.from_torch(
+                    torch.tensor(turn_immediate_rewards, dtype=torch.float32)
+                ),
                 _ppo_train_turns=TensorData.from_torch(torch.tensor(train_turns, dtype=torch.int64)),
             )
         data.append(datum)
         accumulator.clear()
         turn_rewards.clear()
+        turn_immediate_rewards.clear()
         train_turns.clear()
         turn_start = turn_count
 
@@ -428,6 +433,11 @@ def trajectory_to_data(
             # Turn rewards are increments, not cumulative scores. Terminal mode
             # uses only reward_processor's trajectory reward, assigned below.
             turn_rewards.append(float(step["reward"]) if ppo_reward_mode == "turn" else 0.0)
+            # The part of the turn's reward that PPO may discount with gamma=0 (ppo.immediate_rewards).
+            reward_misc = step["misc"].get("reward_misc") or {}
+            turn_immediate_rewards.append(
+                float(reward_misc.get("immediate_reward", 0.0)) if ppo_reward_mode == "turn" else 0.0
+            )
             train_turns.append(not has_error)
             turn_count += 1
 

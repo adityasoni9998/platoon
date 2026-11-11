@@ -279,6 +279,10 @@ async def run_rollout(task: Task, config: RolloutConfig) -> dict | TrajectoryCol
             hook_config=hook_config,
             use_binary_reward=config.extra.get("use_binary_reward", False),
             turn_rewards=config.extra.get("turn_rewards", False),
+            test_run_reward=float(config.extra.get("test_run_reward", 0.0)),
+            immediate_regression_penalty=bool(
+                config.extra.get("immediate_regression_penalty", False)),
+            file_editor_penalty=float(config.extra.get("file_editor_penalty", 0.05)),
             reward_artifact_dir=config.output_dir,
         )
         agent_init_s = time.perf_counter() - agent_init_start

@@ -8,7 +8,9 @@ Reads the reward info each turn stores in ``step.misc["reward_misc"]``:
 - tool formatting, unweighted (a turn counts when its penalty is non-zero, whatever the weight):
   the fraction of turns without a file-editor error and without an agent error, and whether the
   rollout had no tool-JSON error at all. Defaults are 1 (no penalty seen). Terminal-reward runs have
-  no per-turn penalties: the same keys take the final info's whole-conversation checks instead.
+  no per-turn penalties: the same keys take the final info's whole-conversation checks instead;
+- test runs (turn rewards only, 0 otherwise): the rollout's total test-run reward, and the number of
+  turns that ran a meaningful test, counted even when that reward is disabled.
 
 Every trajectory reports every key: the workflow pairs root_* metrics with a mask shared by all groups,
 so a key missing from one group would misalign the others.
@@ -57,5 +59,8 @@ def reward_breakdown(trajectory: dict) -> tuple[float, dict[str, float]]:
         "reward/final/p2p_pass_rate": 1.0 - float(scores.get("p2p_fail_fraction", 0.0)),
         **{f"reward/final/{name}": float(details.get(key, 0.0)) for name, key in F1_SCORES.items()},
         **{f"reward/{name}": value for name, value in formatting.items()},
+        "reward/test_run_reward": sum(float(info.get("test_run_reward", 0.0)) for info in infos),
+        "reward/meaningful_test_turns": float(
+            sum(bool(info.get("meaningful_test_run")) for info in infos)),
     }
     return trajectory["reward"], metrics

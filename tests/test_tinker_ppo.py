@@ -334,6 +334,84 @@ async def test_group_stats_wait_for_the_step_that_trains_the_group():
     assert stats["train/num_steps_mask"] == 2
 
 
+def two_turn_row(turn_rewards, immediate=None):
+    # Action blocks at targets [1, 2) and [3, 5); a turn critic's value sits at each block start.
+    row = datum()
+    row.loss_fn_inputs.update(
+        target_tokens=tensor([11, 12, 13, 14, 15]),
+        mask=tensor([0.0, 1.0, 0.0, 1.0, 1.0]),
+        logprobs=tensor([0.0, -0.2, 0.0, -0.3, -0.1]),
+        _ppo_turn_range=tensor([0, 1]),
+        _ppo_rewards=tensor(turn_rewards),
+        _ppo_train_turns=tensor([1, 1]),
+    )
+    if immediate is not None:
+        row.loss_fn_inputs["_ppo_immediate_rewards"] = tensor(immediate)
+    return row
+
+
+def test_immediate_rewards_are_discounted_with_gamma_zero():
+    # Turn rewards 0.3 and 0.6 include immediate penalties of -0.05 each, so the rest is 0.35 and 0.65.
+    values = {"values": tensor([9.0, 0.1, 9.0, 0.2, 9.0])}
+    kwargs = dict(gamma=0.9, value_granularity="turn")
+    rows = [two_turn_row([0.3, 0.6], [-0.05, -0.05])]
+    (on,), _ = prepare_batch(rows, [values], "none", immediate_rewards=True, **kwargs)
+    # Turn 1: 0.35 + 0.9 * 0.65 + its own -0.05; turn 2: 0.65 - 0.05. Later penalties never reach turn 1.
+    assert on.returns[[1, 3]] == pytest.approx([0.885, 0.6])
+    assert on.advantages[[1, 3, 4]] == pytest.approx([0.885 - 0.1, 0.6 - 0.2, 0.6 - 0.2])  # target - value
+    (off,), _ = prepare_batch([two_turn_row([0.3, 0.6], [-0.05, -0.05])], [values], "none", **kwargs)
+    (plain,), _ = prepare_batch([two_turn_row([0.3, 0.6])], [values], "none", **kwargs)
+    # Off (the default), the immediate part is an ordinary discounted reward: 0.3 + 0.9 * 0.6.
+    assert off.returns[[1, 3]] == pytest.approx([0.84, 0.6])
+    np.testing.assert_array_equal(off.returns, plain.returns)
+    np.testing.assert_array_equal(off.advantages, plain.advantages)
+
+
+def test_immediate_rewards_count_for_every_decision_of_their_turn_with_a_token_critic():
+    values = {"values": tensor([0.0, 0.0, 0.0, 0.0, 0.0])}
+    (row,), _ = prepare_batch([two_turn_row([0.3, 0.6], [-0.05, -0.05])], [values], "none", immediate_rewards=True)
+    # gamma = 1: the rest's reward-to-go is 1.0 at turn 1's token and 0.65 at turn 2's, plus each turn's own -0.05.
+    assert row.returns[[1, 3, 4]] == pytest.approx([0.95, 0.6, 0.6])
+
+
+def test_immediate_rewards_without_the_tensor_are_zero():
+    values = {"values": tensor([9.0, 0.1, 9.0, 0.2, 9.0])}
+    (with_flag,), _ = prepare_batch([two_turn_row([0.3, 0.6])], [values], "none", immediate_rewards=True,
+                                   value_granularity="turn")
+    (without,), _ = prepare_batch([two_turn_row([0.3, 0.6])], [values], "none", value_granularity="turn")
+    np.testing.assert_array_equal(with_flag.returns, without.returns)
+
+
+def test_immediate_rewards_are_opt_in_and_need_turn_rewards():
+    assert PPOConfig().immediate_rewards is False
+    config(ppo=PPOConfig(reward_mode="turn", immediate_rewards=True))
+    with pytest.raises(ValueError, match="immediate_rewards requires reward_mode=turn"):
+        config(ppo=PPOConfig(reward_mode="terminal", immediate_rewards=True))
+
+
+def test_turn_conversion_records_each_turns_immediate_reward():
+    from platoon.train.tinker.proxy import TinkerLLMInteraction
+    from platoon.utils.tinker_data_processing import trajectory_to_data
+
+    interactions = {
+        key: TinkerLLMInteraction(
+            tinker.ModelInput.from_ints(prompt), SimpleNamespace(tokens=[1, 2], logprobs=[-0.1, -0.1])
+        )
+        for key, prompt in (("a", [10]), ("b", [10, 1, 2, 20]))
+    }
+    steps = [
+        {"reward": 0.25, "misc": {"action_misc": {"completion_id": "a"}, "reward_misc": {"immediate_reward": -0.05}}},
+        {"reward": 0.5, "misc": {"action_misc": {"completion_id": "b"}, "reward_misc": {}}},
+    ]
+    result = trajectory_to_data(
+        trajectory={"steps": steps}, interactions=interactions, task_id="task", trajectory_id="trajectory",
+        trajectory_advantage=0.0, checkpoint_version=0, ppo_reward_mode="turn",
+    )
+    (row,) = result.datums
+    assert row.loss_fn_inputs["_ppo_rewards"].to_torch().tolist() == pytest.approx([0.25, 0.5])
+    assert row.loss_fn_inputs["_ppo_immediate_rewards"].to_torch().tolist() == pytest.approx([-0.05, 0.0])
+
+
 def test_real_prefix_conversion_keeps_observations_masked_and_terminal_targets():
     from platoon.train.tinker.proxy import TinkerLLMInteraction
     from platoon.utils.tinker_data_processing import trajectory_to_data

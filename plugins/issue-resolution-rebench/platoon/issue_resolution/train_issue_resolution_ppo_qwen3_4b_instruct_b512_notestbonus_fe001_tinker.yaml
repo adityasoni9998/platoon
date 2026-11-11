@@ -1,0 +1,116 @@
+# Variant B (pt3jjxi1) without the test-run bonus and with a smaller file_editor penalty; everything else identical.
+# Changes from train_issue_resolution_ppo_qwen3_4b_instruct_b512_testrun_tinker.yaml as launched for pt3jjxi1:
+#   - test_run_reward: 0.0 (was 0.05): no test-run bonus.
+#   - file_editor_penalty: 0.01 (was 0.05, hard-coded): per turn with a file_editor error. The tool-JSON and
+#     agent-error penalties stay at 0.05.
+#   - ppo.immediate_rewards: true (pt3jjxi1 passed it on the command line): the three tool penalties are discounted
+#     with gamma=0, so each lands only on its own turn; all other rewards keep gamma=0.99.
+# Unchanged: CISPO actor with a fresh turn-level critic (12 warmup batches), turn rewards 0.30 localization + 0.70
+# testing with immediate_regression_penalty, gamma=0.99, lambda=1, 75 turns, 4096 output tokens in a 65K context,
+# default2.j2 prompt, B512 x 1 rollout.
+train:
+  algorithm: ppo
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct_exact
+  context_window_length: 65000
+  batch_size: 512
+  extra_rollout_groups: 0
+  rollout_tail_tolerance_pct: 0.0  # Wait for all 512 slots: stale results that fill tail slots ratchet the stale count up.
+  num_epochs: null  # Use the 500-step budget instead of an epoch limit.
+  max_training_steps: 500
+  num_minibatches: 1
+  num_microbatches: 1
+  max_staleness: 1
+  lora_rank: 0
+  loss_fn: cispo
+  loss_fn_config:
+    clip_low_threshold: 0.0
+    clip_high_threshold: 5.0
+  optimizer:
+    learning_rate: 1.0e-6
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-8
+    weight_decay: 0.017
+    grad_clip_norm: 1.0
+  ppo:
+    value_granularity: turn
+    reward_mode: turn
+    advantage_normalization_granularity: turn
+    immediate_rewards: true  # pt3jjxi1 set this on the command line.
+    # Discount per turn: a reward 75 turns later counts 0.99^75 = 0.47 as much.
+    gamma: 0.99
+    gae_lambda: 1.0
+    advantage_normalization: batch
+    actor_epochs: 1
+    critic_epochs: 1
+    critic_warmup_batches: 12  # One loader epoch: floor(6542 / 512), with drop_last=True.
+    # K=4 gives 48 critic optimizer updates across those 12 warmup batches.
+    critic:
+      value_clip: 0.2
+      num_minibatches: 4
+      num_microbatches: 1
+      optimizer:
+        learning_rate: 5.0e-6
+        beta1: 0.9
+        beta2: 0.95
+        eps: 1.0e-8
+        weight_decay: 0.017
+        grad_clip_norm: 1.0
+  workflow_config:
+    group_size: 1
+    leave_one_out_baseline: false
+    depth_level_weighting: false
+    filter_zero_variance_groups: false
+    rollout_config:
+      max_steps: 75
+      verbose: true
+      train: true
+      timeout: 1800
+      step_timeout: 600
+      extra:
+        worker_start_method: forkserver  # exec retains the fresh-interpreter launcher.
+        workspace:
+          type: apptainer
+          apptainer:
+            sif_dir: /groups/gai51740/aci19058gb/apptainer/sif
+            cache_dir: /groups/gai51740/aci19058gb/apptainer/cache/apptainer
+            scratch_dir: null  # Required CLI override: current allocation's node-local scratch.
+        max_input_tokens: 60904  # 65000 - 4096
+        user_prompt: default2.j2
+        test_run_reward: 0.0
+        file_editor_penalty: 0.01
+        immediate_regression_penalty: true
+        use_binary_reward: false
+      inference_params:
+        temperature: 1.0
+        max_completion_tokens: 4096
+  num_concurrent_rollout_workflow_workers: 512
+
+eval:
+  strategy: none
+
+checkpoint:
+  strategy: step
+  # Counts trainer batches, including the 12 critic-only warmup batches.
+  # The first scheduled save is during critic warmup.
+  every: 10
+  load_checkpoint_path: null
+
+watchdog:
+  enabled: false
+
+log_path: /groups/gai51740/aci19058gb/miles_hyperion
+tinker_base_url: null  # Set --tinker_base_url at launch.
+
+stats:
+  experiment_name: issue-resolution-rebench-tinker
+  trial_name: null  # Set --stats.trial_name at launch.
+  wandb:
+    mode: online
+    project: issue_resolution-miles
+    entity: null
+    tags: [issue_resolution, swe_rebench, tinker, cispo, critic, k4, turn_critic, turn_rewards, prompt_default2, no_test_run_reward, fe_penalty_001, immediate_penalties, immediate_regression, gamma099]
+
+inference_tunnel:
+  backend: none

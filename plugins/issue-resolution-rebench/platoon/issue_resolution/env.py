@@ -5,12 +5,13 @@ from pathlib import Path
 
 from openhands.sdk.workspace import BaseWorkspace
 from platoon.openhands.env import OpenHandsEnv
-from platoon.utils.openhands_utils import is_finished
+from platoon.utils.openhands_utils import group_actions, is_finished
 from platoon.issue_resolution.test_execution_reward.test_execution_reward import compute_test_execution_reward
 from platoon.issue_resolution.localization_reward.localization_reward import compute_localization_reward, score_sources
 from platoon.issue_resolution.tool_error_reward.tool_json_error import compute_tool_json_error_reward
 from platoon.issue_resolution.tool_error_reward.agent_error_event import compute_agent_error_reward
 from platoon.issue_resolution.tool_error_reward.str_replace_errors import compute_str_replace_reward
+from platoon.issue_resolution.test_run_reward.schedule import schedule_test_rewards
 from platoon.issue_resolution.turn_snapshots import (
     EMPTY_PATCH_HASH, capture_command, completion_snapshots, download_snapshots,
 )
@@ -58,17 +59,27 @@ class SWERebenchEnv(OpenHandsEnv):
     def __init__(
         self, task, agent, workspace, *, use_binary_reward: bool = False,
         turn_rewards: bool = False, reward_artifact_dir: str | None = None,
+        test_run_reward: float = 0.0, immediate_regression_penalty: bool = False,
+        file_editor_penalty: float = 0.05,
         **kwargs,
     ):
         super().__init__(task=task, agent=agent, workspace=workspace, **kwargs)
         self._terminal_result = None
         self._use_binary_reward = use_binary_reward
         self._turn_rewards_enabled = turn_rewards
+        # Turn rewards only: the reward for each interval's last meaningful test run (0 disables it),
+        # and whether score drops are charged on the turn they happen instead of at the end.
+        self._test_run_reward = test_run_reward
+        self._immediate_regression_penalty = immediate_regression_penalty
+        # Turn rewards only: the size of the penalty for a turn with a file_editor error.
+        self._file_editor_penalty = file_editor_penalty
         self._test_execution_semaphore = asyncio.Semaphore(8)
         self._snapshot_scores = {}
         self._completion_snapshots = {}
+        self._test_run_rewards, self._test_run_details = {}, {}
         self._previous_patch_hash = EMPTY_PATCH_HASH
         self._best_localization = self._best_test = 0.0
+        self._previous_localization = self._previous_test = 0.0
         self.turn_reward_error = None
         self._reward_artifact_dir = Path(reward_artifact_dir) if reward_artifact_dir else None
         if turn_rewards:
@@ -85,19 +96,26 @@ class SWERebenchEnv(OpenHandsEnv):
         self.turn_reward_error = None
         self._previous_patch_hash = EMPTY_PATCH_HASH
         self._best_localization = self._best_test = 0.0
+        self._previous_localization = self._previous_test = 0.0
         try:
             observation = await super().reset()
             # Generation has finished. Reuse the SDK action/completion IDs;
             # the normal step loop will handle action/observation pairing.
-            self._completion_snapshots = completion_snapshots(
-                self._state.conversation_state.events, capture_command(self._task.misc),
-            )
+            events = self._state.conversation_state.events
+            self._completion_snapshots = completion_snapshots(events, capture_command(self._task.misc))
             snapshots = await asyncio.to_thread(
                 download_snapshots, self._workspace, self._reward_artifact_dir,
             )
             snapshots.setdefault(EMPTY_PATCH_HASH, {"patch": ""})
             results = await asyncio.gather(*(self._score_snapshot(s) for s in snapshots.values()))
             self._snapshot_scores = dict(zip(snapshots, results, strict=True))
+            # The test-run reward needs the whole rollout: an interval's last test is known only
+            # once the next source edit (or the end) is reached.
+            _, action_to_completion, _, _ = group_actions(events)
+            self._test_run_rewards, self._test_run_details = schedule_test_rewards(
+                events, action_to_completion, self._completion_snapshots, snapshots,
+                self._test_run_reward, self._task.misc.get("repo_path", "/testbed"),
+            )
             return observation
         except Exception as error:
             # run_episode logs ordinary exceptions and returns its partial
@@ -131,10 +149,16 @@ class SWERebenchEnv(OpenHandsEnv):
         patch_hash = self._completion_snapshots.get(completion, self._previous_patch_hash)
         scores = self._snapshot_scores[patch_hash]
         localization, test = scores["localization_reward"], scores["composite_reward"]
-        dl, dt = localization - self._best_localization, test - self._best_test
         final = is_finished(self._state)
-        if not final:
-            dl, dt = max(dl, 0.0), max(dt, 0.0)
+        if self._immediate_regression_penalty:
+            # Change since the previous turn, drops included: they sum to the final score.
+            dl, dt = localization - self._previous_localization, test - self._previous_test
+        else:
+            # Gains over the best so far; the final turn settles any drop from that best.
+            dl, dt = localization - self._best_localization, test - self._best_test
+            if not final:
+                dl, dt = max(dl, 0.0), max(dt, 0.0)
+        self._previous_localization, self._previous_test = localization, test
         self._best_localization = max(self._best_localization, localization)
         self._best_test = max(self._best_test, test)
 
@@ -145,11 +169,17 @@ class SWERebenchEnv(OpenHandsEnv):
         penalties = {
             "tool_json_penalty": -0.05 if json_reward == 0 else 0.0,
             "agent_error_penalty": -0.05 if agent_reward == 0 else 0.0,
-            "file_editor_penalty": -0.05 if editor_info["file_editor_errors"] else 0.0,
+            "file_editor_penalty": -self._file_editor_penalty if editor_info["file_editor_errors"] else 0.0,
         }
-        reward = 0.30 * dl + 0.70 * dt + sum(penalties.values())
+        test_run_reward = self._test_run_rewards.get(completion, 0.0)
+        reward = 0.30 * dl + 0.70 * dt + sum(penalties.values()) + test_run_reward
         info = {
             **json_info, **agent_info, **editor_info, **penalties,
+            # The tool penalties, part of this turn's reward: PPO discounts them with gamma=0 when
+            # ppo.immediate_rewards is on.
+            "immediate_reward": sum(penalties.values()),
+            "test_run_reward": test_run_reward,
+            **self._test_run_details.get(completion, {}),
             "reward_mode": "turn", "patch_hash": patch_hash,
             "snapshot_unchanged": patch_hash == self._previous_patch_hash,
             "localization_reward": localization, "composite_reward": test,

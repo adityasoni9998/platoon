@@ -50,6 +50,9 @@ class PPOConfig:
     gae_lambda: float = 1.0
     advantage_normalization: Literal["batch", "none"] = "batch"
     advantage_normalization_granularity: Literal["token", "turn"] | None = None  # None follows value_granularity.
+    # Turn rewards only: discount each step's immediate_reward with gamma=0, so a turn's return target includes
+    # its own immediate reward but no later ones; the rest of the reward keeps gamma.
+    immediate_rewards: bool = False
     actor_epochs: int = 1
     critic_epochs: int = 1
     critic_warmup_batches: int = 1
@@ -129,6 +132,8 @@ class TrainConfig:
             raise ValueError("ppo.advantage_normalization_granularity must be token, turn, or None")
         if self.ppo.value_granularity == "token" and self.ppo.advantage_normalization_granularity == "turn":
             raise ValueError("Turn-level advantage normalization requires value_granularity=turn")
+        if self.ppo.immediate_rewards and self.ppo.reward_mode != "turn":
+            raise ValueError("ppo.immediate_rewards requires reward_mode=turn")
         if self.workflow_config.leave_one_out_baseline or self.workflow_config.depth_level_weighting:
             raise ValueError("PPO does not support GRPO leave-one-out baselines or depth weighting")
 

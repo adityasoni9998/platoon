@@ -64,6 +64,7 @@ def prepare_batch(
     gae_lambda: float = 1.0,
     value_granularity: str = "token",
     advantage_normalization_granularity: str | None = None,
+    immediate_rewards: bool = False,
 ) -> tuple[list[PreparedDatum], dict]:
     """Compute rollout-wide GAE, then freeze critic targets and whiten actor advantages.
 
@@ -76,6 +77,12 @@ def prepare_batch(
     Critic loss and value statistics count each trained value position once.
     Whitening and advantage statistics default to that same granularity, but
     turn critics can use token-level whitening. Actor loss remains a token mean.
+
+    With immediate_rewards, each turn's reward splits into its immediate part
+    (``_ppo_immediate_rewards``, discounted with gamma=0) and the rest (discounted
+    with gamma). A turn's return target is the rest's GAE target plus its own
+    immediate part, and its advantage the rest's GAE advantage plus that part: with
+    lambda=1, exactly target - value.
     """
     if advantage_normalization_granularity is None:
         advantage_normalization_granularity = value_granularity
@@ -108,6 +115,9 @@ def prepare_batch(
             == len(inputs["_ppo_train_turns"].data)
         ):
             raise ValueError("PPO turn range/rewards must match the action-mask blocks")
+        immediate = inputs.get("_ppo_immediate_rewards")
+        if immediate_rewards and immediate is not None and len(immediate.data) != len(blocks[index]):
+            raise ValueError("PPO immediate rewards must match the action-mask blocks")
         groups.setdefault(key, []).append((first, last, index))
 
     advantages = [np.zeros_like(value) for value in values]
@@ -124,26 +134,35 @@ def prepare_batch(
             inputs = datums[index].loss_fn_inputs
             rewards = inputs["_ppo_rewards"].to_numpy().tolist()
             train_turns = inputs["_ppo_train_turns"].to_numpy().tolist()
+            immediate = inputs.get("_ppo_immediate_rewards")
+            use = immediate_rewards and immediate is not None
+            immediate = immediate.to_numpy().tolist() if use else [0.0] * len(rewards)
             turns.extend(
-                (index, start, end, reward, train)
-                for (start, end), reward, train in zip(blocks[index], rewards, train_turns, strict=True)
+                (index, start, end, reward, train, now)
+                for (start, end), reward, train, now in zip(blocks[index], rewards, train_turns, immediate, strict=True)
             )
 
         decision_values = np.concatenate(
             [
                 values[index][start:end] if value_granularity == "token" else values[index][start : start + 1]
-                for index, start, end, _, _ in turns
+                for index, start, end, *_ in turns
             ]
         )
         decision_rewards = np.zeros_like(decision_values)
+        immediate_part = np.zeros_like(decision_values)  # each decision's own-turn immediate reward
         offset = 0
-        for _, start, end, reward, _ in turns:
-            offset += end - start if value_granularity == "token" else 1
-            decision_rewards[offset - 1] = reward  # A turn's reward occurs after its last action token.
+        for _, start, end, reward, _, now in turns:
+            size = end - start if value_granularity == "token" else 1
+            # A turn's reward occurs after its last action token; its immediate part is not discounted
+            # into earlier decisions, but counts for every decision of its own turn.
+            decision_rewards[offset + size - 1] = reward - now
+            immediate_part[offset : offset + size] = now
+            offset += size
         adv, targets = compute_gae(decision_values, decision_rewards, gamma, gae_lambda)
+        adv, targets = adv + immediate_part, targets + immediate_part
 
         offset = 0
-        for index, start, end, _, train in turns:
+        for index, start, end, _, train, _ in turns:
             size = end - start if value_granularity == "token" else 1
             advantages[index][start:end] = adv[offset : offset + size]
             returns[index][start : start + size] = targets[offset : offset + size]
@@ -277,6 +296,7 @@ async def update_batch(trainer, shared_state, datums: list[tinker.Datum]) -> Non
         gae_lambda=config.ppo.gae_lambda,
         value_granularity=config.ppo.value_granularity,
         advantage_normalization_granularity=config.ppo.advantage_normalization_granularity,
+        immediate_rewards=config.ppo.immediate_rewards,
     )
     tracker.scalar(**{"timing/prepare_batch": time.perf_counter() - start})
     if not prepared:
